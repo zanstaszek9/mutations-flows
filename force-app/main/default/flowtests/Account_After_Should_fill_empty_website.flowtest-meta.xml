@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<FlowTest xmlns="http://soap.sforce.com/2006/04/metadata">
+    <flowApiName>Account_After</flowApiName>
+    <label>Should fill empty website</label>
+    <testPoints>
+        <elementApiName>Start</elementApiName>
+        <isUseMockOutput>false</isUseMockOutput>
+        <parameters>
+            <leftValueReference>$Record</leftValueReference>
+            <type>InputTriggeringRecordInitial</type>
+            <value>
+                <sobjectValue>{&quot;CleanStatus&quot;:&quot;Pending&quot;,&quot;Name&quot;:&quot;Test Acc&quot;,&quot;OwnerId&quot;:&quot;005d200000ET1ThAAL&quot;}</sobjectValue>
+            </value>
+        </parameters>
+    </testPoints>
+    <testPoints>
+        <assertions>
+            <conditions>
+                <leftValueReference>Find_and_fill_Website.recordId.Website</leftValueReference>
+                <operator>EqualTo</operator>
+                <rightValue>
+                    <stringValue></stringValue>
+                </rightValue>
+            </conditions>
+        </assertions>
+        <assertions>
+            <conditions>
+                <leftValueReference>Update_Website</leftValueReference>
+                <operator>EqualTo</operator>
+                <rightValue>
+                    <booleanValue>true</booleanValue>
+                </rightValue>
+            </conditions>
+        </assertions>
+        <elementApiName>Finish</elementApiName>
+        <isUseMockOutput>false</isUseMockOutput>
+    </testPoints>
+    <testType>WithAssertion</testType>
+</FlowTest>

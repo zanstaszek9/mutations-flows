@@ -1,0 +1,2 @@
+exclude_path = ["CHANGELOG.md", "package-lock.json"]
+exclude = ["https?://(www\\.)?npmjs\\.(com|org)", "https?://biomejs\\.dev"]

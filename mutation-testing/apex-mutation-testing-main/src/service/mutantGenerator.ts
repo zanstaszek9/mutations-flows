@@ -1,0 +1,357 @@
+import type { Messages } from '@salesforce/core'
+import { ParserRuleContext, TokenStreamRewriter } from 'antlr4ts'
+import {
+  ApexLexer,
+  ApexParser,
+  ApexParserListener,
+  CaseInsensitiveInputStream,
+  CommonTokenStream,
+  ParseTreeWalker,
+} from 'apex-parser'
+import { ArgumentPropagationMutator } from '../mutator/argumentPropagationMutator.js'
+import { ArithmeticOperatorDeletionMutator } from '../mutator/arithmeticOperatorDeletionMutator.js'
+import { ArithmeticOperatorMutator } from '../mutator/arithmeticOperatorMutator.js'
+import { BaseListener } from '../mutator/baseListener.js'
+import { BitwiseOperatorMutator } from '../mutator/bitwiseOperatorMutator.js'
+import { BoundaryConditionMutator } from '../mutator/boundaryConditionMutator.js'
+import { ConstructorCallMutator } from '../mutator/constructorCallMutator.js'
+import { EmptyReturnMutator } from '../mutator/emptyReturnMutator.js'
+import { EqualityConditionMutator } from '../mutator/equalityConditionMutator.js'
+import { ExperimentalSwitchMutator } from '../mutator/experimentalSwitchMutator.js'
+import { FalseReturnMutator } from '../mutator/falseReturnMutator.js'
+import { IncrementMutator } from '../mutator/incrementMutator.js'
+import { InlineConstantMutator } from '../mutator/inlineConstantMutator.js'
+import { InvertNegativesMutator } from '../mutator/invertNegativesMutator.js'
+import { LogicalOperatorDeletionMutator } from '../mutator/logicalOperatorDeletionMutator.js'
+import { LogicalOperatorMutator } from '../mutator/logicalOperatorMutator.js'
+import { MemberVariableMutator } from '../mutator/memberVariableMutator.js'
+import { MutationListener } from '../mutator/mutationListener.js'
+import { NakedReceiverMutator } from '../mutator/nakedReceiverMutator.js'
+import { NegationMutator } from '../mutator/negationMutator.js'
+import { NonVoidMethodCallMutator } from '../mutator/nonVoidMethodCallMutator.js'
+import { NullReturnMutator } from '../mutator/nullReturnMutator.js'
+import { RemoveConditionalsMutator } from '../mutator/removeConditionalsMutator.js'
+import { RemoveIncrementsMutator } from '../mutator/removeIncrementsMutator.js'
+import { SwitchMutator } from '../mutator/switchMutator.js'
+import { TrueReturnMutator } from '../mutator/trueReturnMutator.js'
+import { UnaryOperatorInsertionMutator } from '../mutator/unaryOperatorInsertionMutator.js'
+import { VoidMethodCallMutator } from '../mutator/voidMethodCallMutator.js'
+import { ApexMutation } from '../type/ApexMutation.js'
+import { TypeRegistry } from '../type/TypeRegistry.js'
+import type { SkipPattern } from './skipPattern.js'
+
+const MUTATOR_NAME = {
+  ARGUMENT_PROPAGATION: 'ArgumentPropagation',
+  ARITHMETIC_OPERATOR: 'ArithmeticOperator',
+  ARITHMETIC_OPERATOR_DELETION: 'ArithmeticOperatorDeletion',
+  BITWISE_OPERATOR: 'BitwiseOperator',
+  BOUNDARY_CONDITION: 'BoundaryCondition',
+  CONSTRUCTOR_CALL: 'ConstructorCall',
+  EMPTY_RETURN: 'EmptyReturn',
+  EQUALITY_CONDITION: 'EqualityCondition',
+  EXPERIMENTAL_SWITCH: 'ExperimentalSwitch',
+  FALSE_RETURN: 'FalseReturn',
+  INCREMENT: 'Increment',
+  INLINE_CONSTANT: 'InlineConstant',
+  INVERT_NEGATIVES: 'InvertNegatives',
+  LOGICAL_OPERATOR: 'LogicalOperator',
+  LOGICAL_OPERATOR_DELETION: 'LogicalOperatorDeletion',
+  MEMBER_VARIABLE: 'MemberVariable',
+  NAKED_RECEIVER: 'NakedReceiver',
+  NEGATION: 'Negation',
+  NON_VOID_METHOD_CALL: 'NonVoidMethodCall',
+  NULL_RETURN: 'NullReturn',
+  REMOVE_CONDITIONALS: 'RemoveConditionals',
+  REMOVE_INCREMENTS: 'RemoveIncrements',
+  SWITCH: 'Switch',
+  TRUE_RETURN: 'TrueReturn',
+  UNARY_OPERATOR_INSERTION: 'UnaryOperatorInsertion',
+  VOID_METHOD_CALL: 'VoidMethodCall',
+} as const
+
+type MutatorName = (typeof MUTATOR_NAME)[keyof typeof MUTATOR_NAME]
+
+interface MutatorRegistryEntry {
+  name: MutatorName
+  create: (typeRegistry?: TypeRegistry) => BaseListener
+}
+
+const MUTATOR_REGISTRY: MutatorRegistryEntry[] = [
+  {
+    name: MUTATOR_NAME.ARGUMENT_PROPAGATION,
+    create: tr => new ArgumentPropagationMutator(tr),
+  },
+  {
+    name: MUTATOR_NAME.ARITHMETIC_OPERATOR,
+    create: tr => new ArithmeticOperatorMutator(tr),
+  },
+  {
+    name: MUTATOR_NAME.ARITHMETIC_OPERATOR_DELETION,
+    create: tr => new ArithmeticOperatorDeletionMutator(tr),
+  },
+  {
+    name: MUTATOR_NAME.BITWISE_OPERATOR,
+    create: () => new BitwiseOperatorMutator(),
+  },
+  {
+    name: MUTATOR_NAME.BOUNDARY_CONDITION,
+    create: () => new BoundaryConditionMutator(),
+  },
+  {
+    name: MUTATOR_NAME.CONSTRUCTOR_CALL,
+    create: () => new ConstructorCallMutator(),
+  },
+  {
+    name: MUTATOR_NAME.EMPTY_RETURN,
+    create: tr => new EmptyReturnMutator(tr),
+  },
+  {
+    name: MUTATOR_NAME.EQUALITY_CONDITION,
+    create: () => new EqualityConditionMutator(),
+  },
+  {
+    name: MUTATOR_NAME.EXPERIMENTAL_SWITCH,
+    create: () => new ExperimentalSwitchMutator(),
+  },
+  {
+    name: MUTATOR_NAME.FALSE_RETURN,
+    create: tr => new FalseReturnMutator(tr),
+  },
+  {
+    name: MUTATOR_NAME.INCREMENT,
+    create: () => new IncrementMutator(),
+  },
+  {
+    name: MUTATOR_NAME.INLINE_CONSTANT,
+    create: tr => new InlineConstantMutator(tr),
+  },
+  {
+    name: MUTATOR_NAME.INVERT_NEGATIVES,
+    create: () => new InvertNegativesMutator(),
+  },
+  {
+    name: MUTATOR_NAME.LOGICAL_OPERATOR,
+    create: () => new LogicalOperatorMutator(),
+  },
+  {
+    name: MUTATOR_NAME.LOGICAL_OPERATOR_DELETION,
+    create: () => new LogicalOperatorDeletionMutator(),
+  },
+  {
+    name: MUTATOR_NAME.MEMBER_VARIABLE,
+    create: () => new MemberVariableMutator(),
+  },
+  {
+    name: MUTATOR_NAME.NAKED_RECEIVER,
+    create: tr => new NakedReceiverMutator(tr),
+  },
+  {
+    name: MUTATOR_NAME.NEGATION,
+    create: tr => new NegationMutator(tr),
+  },
+  {
+    name: MUTATOR_NAME.NON_VOID_METHOD_CALL,
+    create: tr => new NonVoidMethodCallMutator(tr),
+  },
+  {
+    name: MUTATOR_NAME.NULL_RETURN,
+    create: tr => new NullReturnMutator(tr),
+  },
+  {
+    name: MUTATOR_NAME.REMOVE_CONDITIONALS,
+    create: () => new RemoveConditionalsMutator(),
+  },
+  {
+    name: MUTATOR_NAME.REMOVE_INCREMENTS,
+    create: () => new RemoveIncrementsMutator(),
+  },
+  {
+    name: MUTATOR_NAME.SWITCH,
+    create: () => new SwitchMutator(),
+  },
+  {
+    name: MUTATOR_NAME.TRUE_RETURN,
+    create: tr => new TrueReturnMutator(tr),
+  },
+  {
+    name: MUTATOR_NAME.UNARY_OPERATOR_INSERTION,
+    create: tr => new UnaryOperatorInsertionMutator(tr),
+  },
+  {
+    name: MUTATOR_NAME.VOID_METHOD_CALL,
+    create: () => new VoidMethodCallMutator(),
+  },
+]
+
+export type MutatorFilter = { include?: string[]; exclude?: string[] }
+
+const mutatorNameSet = (mutatorFilter?: MutatorFilter): Set<string> =>
+  new Set(
+    (mutatorFilter?.include ?? mutatorFilter?.exclude ?? []).map(name =>
+      name.toLowerCase()
+    )
+  )
+
+// The registry the walker will actually run. An absent filter and one whose
+// name list is empty both select everything — the two are indistinguishable
+// downstream, which is why callers must not treat "a filter object exists" as
+// "a filter narrowed something".
+const selectMutators = (
+  mutatorFilter?: MutatorFilter
+): MutatorRegistryEntry[] => {
+  // Read `include` up front, where `mutatorFilter` may genuinely be absent.
+  // Deferring the optional chain until after the size check would put it where
+  // an undefined filter is already impossible, making it dead syntax.
+  const include = mutatorFilter?.include
+  const nameSet = mutatorNameSet(mutatorFilter)
+  if (nameSet.size === 0) {
+    return MUTATOR_REGISTRY
+  }
+  const isInclude = include !== undefined
+  return MUTATOR_REGISTRY.filter(
+    entry => isInclude === nameSet.has(entry.name.toLowerCase())
+  )
+}
+
+// True only when the filter removes at least one mutator. A list of names that
+// match nothing — a typo in --exclude-mutators — leaves the registry whole, so
+// blaming it for an empty mutation set would send the user after a flag that
+// never narrowed anything.
+export const mutatorFilterNarrows = (mutatorFilter?: MutatorFilter): boolean =>
+  selectMutators(mutatorFilter).length < MUTATOR_REGISTRY.length
+
+interface MutantGeneratorComputeResult {
+  mutations: ApexMutation[]
+  tokenStream: CommonTokenStream
+}
+
+interface PreParsedInput {
+  tree: ParserRuleContext
+  tokenStream: CommonTokenStream
+}
+
+// Diagnostic label for the ANTLR input stream; apex-parser never surfaces it
+// in tokens, tree or errors, so its value is not observable.
+// Stryker disable next-line StringLiteral: diagnostic label only.
+const INPUT_STREAM_NAME = 'other'
+
+export class MutantGenerator {
+  constructor(private readonly messages: Messages<string>) {}
+
+  public compute(
+    classContent: string,
+    coveredLines: Set<number>,
+    typeRegistry?: TypeRegistry,
+    mutatorFilter?: MutatorFilter,
+    skipPatterns: SkipPattern[] = [],
+    allowedLines?: Set<number>,
+    preParsed?: PreParsedInput
+  ): MutantGeneratorComputeResult {
+    let tree: ParserRuleContext
+    let tokenStream: CommonTokenStream
+    if (preParsed) {
+      tree = preParsed.tree
+      tokenStream = preParsed.tokenStream
+    } else {
+      const lexer = new ApexLexer(
+        new CaseInsensitiveInputStream(INPUT_STREAM_NAME, classContent)
+      )
+      tokenStream = new CommonTokenStream(lexer)
+      const parser = new ApexParser(tokenStream)
+      tree = parser.compilationUnit() as ParserRuleContext
+    }
+
+    const filteredRegistry = this.filterRegistry(mutatorFilter)
+
+    const mutators = filteredRegistry.map(entry => entry.create(typeRegistry))
+    const sourceLines = classContent.split('\n')
+
+    const listener = new MutationListener(
+      mutators,
+      coveredLines,
+      skipPatterns,
+      allowedLines,
+      sourceLines
+    )
+
+    ParseTreeWalker.DEFAULT.walk(listener as ApexParserListener, tree)
+
+    return { mutations: listener.getMutations(), tokenStream }
+  }
+
+  public mutate(
+    mutation: ApexMutation,
+    tokenStream: CommonTokenStream
+  ): string {
+    return this.mutateMany([mutation], tokenStream)
+  }
+
+  // Apply N non-overlapping mutations on a single rewriter, producing one
+  // mutated source. Used by the grouping path to deploy a batch of independent
+  // mutations in one Tooling-API class update.
+  //
+  // Caller guarantees mutations have non-overlapping token ranges (groupers
+  // enforce this naturally — same-line mutations always share covering tests
+  // and therefore conflict in the conflict graph). Defensively asserted.
+  public mutateMany(
+    mutations: ReadonlyArray<ApexMutation>,
+    tokenStream: CommonTokenStream
+  ): string {
+    this.assertNonOverlappingRanges(mutations)
+    const rewriter = new TokenStreamRewriter(tokenStream)
+    for (const mutation of mutations) {
+      rewriter.replace(
+        mutation.target.startToken.tokenIndex,
+        mutation.target.endToken.tokenIndex,
+        mutation.replacement
+      )
+    }
+    return rewriter.getText()
+  }
+
+  private assertNonOverlappingRanges(
+    mutations: ReadonlyArray<ApexMutation>
+  ): void {
+    // Early-out only: with fewer than two mutations the comparison loop below
+    // has no iterations and reaches the same conclusion.
+    // Stryker disable next-line ConditionalExpression: shortcut is not observable.
+    if (mutations.length < 2) return
+    const sorted = [...mutations].sort(
+      (a, b) => a.target.startToken.tokenIndex - b.target.startToken.tokenIndex
+    )
+    for (let i = 1; i < sorted.length; ++i) {
+      const prevEnd = sorted[i - 1].target.endToken.tokenIndex
+      const currStart = sorted[i].target.startToken.tokenIndex
+      if (currStart <= prevEnd) {
+        throw new Error(
+          `mutateMany: overlapping token ranges (token ${currStart} ≤ ${prevEnd})`
+        )
+      }
+    }
+  }
+
+  private filterRegistry(
+    mutatorFilter?: MutatorFilter
+  ): MutatorRegistryEntry[] {
+    // Unguarded: warnUnknownMutators loops over the set, so an empty one is
+    // already a no-op. A `size > 0` guard would only be a mutation-proof
+    // equivalent — it cannot change the outcome for any input.
+    this.warnUnknownMutators(mutatorNameSet(mutatorFilter))
+
+    const filtered = selectMutators(mutatorFilter)
+    if (filtered.length === 0) {
+      throw new Error(this.messages.getMessage('error.allMutatorsExcluded'))
+    }
+
+    return filtered
+  }
+
+  private warnUnknownMutators(requestedNames: Set<string>): void {
+    const knownNames = new Set(MUTATOR_REGISTRY.map(e => e.name.toLowerCase()))
+    for (const name of requestedNames) {
+      if (!knownNames.has(name)) {
+        process.emitWarning(`Unknown mutator name: '${name}' — skipping`)
+      }
+    }
+  }
+}

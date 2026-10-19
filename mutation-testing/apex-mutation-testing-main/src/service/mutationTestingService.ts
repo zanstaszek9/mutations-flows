@@ -1,0 +1,925 @@
+import { Messages } from '@salesforce/core'
+import { Progress, Spinner } from '@salesforce/sf-plugins-core'
+import type { CommonTokenStream } from 'apex-parser'
+import type { EngineBundle } from '../port/executionEngine.js'
+import {
+  type Baseline,
+  type BaselineCompileFailure,
+  CompilationCheckFailedError,
+  type RestorePolicy,
+  RUN_TESTS,
+  SKIP_TESTS,
+} from '../port/mutationTestBed.js'
+import { ApexClass } from '../type/ApexClass.js'
+import { ApexMutation } from '../type/ApexMutation.js'
+import { ApexMutationParameter } from '../type/ApexMutationParameter.js'
+import { ApexMutationTestResult } from '../type/ApexMutationTestResult.js'
+import {
+  attachSuiteProvenance,
+  reducePerimeter,
+  SkippedTestClass,
+} from '../type/SkippedTestClass.js'
+import { TestClassOrigins } from '../type/TestClassOrigin.js'
+import { TestClassResolutions } from '../type/TestClassResolution.js'
+import {
+  type TestMethodId,
+  testClassOf,
+  testMethodOf,
+} from '../type/TestMethodId.js'
+import { ConfigReader } from './configReader.js'
+import {
+  type OutputSink,
+  renderOrgDetail,
+  writeToStdout,
+} from './engineNotice.js'
+import { decideExactOutcome, solveColoring } from './exactColoring.js'
+import { GroupExecutor } from './groupExecutor.js'
+import {
+  MutantGenerator,
+  type MutatorFilter,
+  mutatorFilterNarrows,
+} from './mutantGenerator.js'
+import {
+  assembleGroups,
+  groupMutationsWithInternals,
+  type MutationGroup,
+} from './mutationGrouper.js'
+import {
+  calculateMutationPosition,
+  extractMutationOriginalText,
+} from './mutationLocation.js'
+import { diagnoseNoMutations } from './noMutationsDiagnosis.js'
+import type { SkipPattern } from './skipPattern.js'
+import {
+  formatSkippedTestClasses,
+  sanitizeForDisplay,
+} from './skippedTestClassMessage.js'
+import { formatDuration } from './timeUtils.js'
+import { type TypeAnalysisResult, TypeDiscoverer } from './typeDiscoverer.js'
+import { AliasTypeMatcher } from './typeMatcher.js'
+
+// A filter entry matches a coverage-map id either by its bare method name
+// (applying the entry to that method in every perimeter class) or by one of
+// the declaring class's resolved lookup keys, qualified (scoping the entry to
+// that one class). Both the CLI flag and the .mutation-testing.json
+// testMethods block land in the same includeTestMethods/excludeTestMethods
+// fields, so this single rule covers both. With a bare entry and a qualified
+// one both present in lookupKeys, a two-segment filter entry like
+// `ArgumentTest.testFoo` matches `testFoo` in every class whose bare name is
+// `ArgumentTest`, while `mockery.ArgumentTest.testFoo` matches exactly one —
+// the existing bare-is-broad / qualified-is-narrow principle lifted from the
+// method to the class.
+const matchesFilter = (
+  id: TestMethodId,
+  filterSet: ReadonlySet<string>,
+  resolutions: TestClassResolutions
+): boolean => {
+  const method = testMethodOf(id).toLowerCase()
+  if (filterSet.has(method)) return true
+  // Stryker disable next-line ArrayDeclaration: filterSet is built
+  // exclusively via .map(entry => entry.toLowerCase()); the injected
+  // uppercase literal can never be a member.
+  const keys = resolutions.get(testClassOf(id))?.lookupKeys ?? []
+  return keys.some(key => filterSet.has(`${key}.${method}`))
+}
+
+// Every mutation belongs to exactly one group and every group reports a result,
+// so no slot is still null by the time the results are assembled — this is a
+// type guard for the compiler rather than a runtime narrowing.
+// Stryker disable next-line ConditionalExpression: no null slots remain.
+const isPresent = <T>(value: T | null): value is T => value !== null
+
+// Emitted when the progress bar cannot be torn down on the failure path. The
+// rollback that follows matters more, so this is reported and stepped over.
+const PROGRESS_TEARDOWN_WARNING =
+  'Warning: could not tear down the progress display. Cause:'
+
+interface MutationLoopContext {
+  apexClass: ApexClass
+  mutations: ApexMutation[]
+  groups: MutationGroup[]
+  mutantGenerator: MutantGenerator
+  tokenStream: CommonTokenStream
+  testMethodsPerLine: Map<number, Set<TestMethodId>>
+  retainedTestClassNames: string[]
+}
+
+export class MutationTestingService {
+  protected readonly apexClassName: string
+  protected readonly apexTestClassNames: string[]
+  protected readonly dryRun: boolean
+  protected readonly includeMutators: string[] | undefined
+  protected readonly excludeMutators: string[] | undefined
+  protected readonly includeTestMethods: string[] | undefined
+  protected readonly excludeTestMethods: string[] | undefined
+  private readonly skipPatterns: SkipPattern[]
+  private readonly allowedLines: Set<number> | undefined
+  // Kept alongside the parsed set so the empty-mutation-set diagnosis can echo
+  // the ranges the user actually typed, not a reconstruction of them.
+  private readonly requestedLines: string[]
+  private readonly mutationGroupingEnabled: boolean
+  private readonly testClassOrigins: TestClassOrigins | undefined
+  private readonly testClassResolutions: TestClassResolutions
+  // Assigned by fetchApexClass before any reader runs; no meaningful seed.
+  private apexClassContent!: string
+
+  constructor(
+    protected readonly progress: Progress,
+    protected readonly spinner: Spinner,
+    private readonly engine: EngineBundle,
+    {
+      apexClassName,
+      apexTestClassNames,
+      dryRun,
+      includeMutators,
+      excludeMutators,
+      includeTestMethods,
+      excludeTestMethods,
+      skipPatterns,
+      lines,
+      mutationGrouping,
+      testClassOrigins,
+      testClassResolutions,
+    }: ApexMutationParameter,
+    protected readonly messages: Messages<string>,
+    private readonly outputSink: OutputSink = writeToStdout
+  ) {
+    this.apexClassName = apexClassName
+    this.apexTestClassNames = apexTestClassNames
+    this.dryRun = dryRun ?? false
+    this.includeMutators = includeMutators
+    this.excludeMutators = excludeMutators
+    this.includeTestMethods = includeTestMethods
+    this.excludeTestMethods = excludeTestMethods
+    this.skipPatterns = ConfigReader.compileSkipPatterns(skipPatterns, messages)
+    this.allowedLines = ConfigReader.parseLineRanges(lines, messages)
+    // The `?? []` fallback is not observable: `this.requestedLines` is only
+    // read in buildNoMutationsError's 'line-range' arm, which diagnoseNoMutations
+    // only reaches when `this.allowedLines` is defined (see isLineWithinAllowed —
+    // an undefined allowedLines makes every line "in range", so `inRange` can
+    // never come back empty). ConfigReader.parseLineRanges only returns a
+    // defined Set when `lines` is a non-empty array, so whenever the fallback
+    // would matter (`lines` falsy/empty), `allowedLines` is undefined and the
+    // 'line-range' arm — the only reader of requestedLines — is unreachable.
+    // Verified by hand-mutating the fallback to a non-empty sentinel array and
+    // running the full unit+integration+NUT suite (2115 tests): all pass
+    // unchanged.
+    this.requestedLines = lines ?? []
+    this.mutationGroupingEnabled = mutationGrouping ?? false
+    this.testClassOrigins = testClassOrigins
+    this.testClassResolutions = testClassResolutions ?? new Map()
+  }
+
+  // One canonical spelling of the joined test class perimeter, so every log
+  // line, message and spinner text within this service renders it identically.
+  private get testClassPerimeter(): string {
+    return this.apexTestClassNames.join(', ')
+  }
+
+  public async process(): Promise<ApexMutationTestResult> {
+    const apexClass = await this.fetchApexClass()
+    const typeAnalysis = await this.discoverTypes(apexClass)
+
+    const { testMethodsPerLine, retainedTestClassNames, cost } =
+      await this.runBaselineTests(apexClass)
+    const coveredLines = this.extractCoveredLines(testMethodsPerLine)
+    const { mutations, mutantGenerator, tokenStream } = this.generateMutations(
+      apexClass,
+      coveredLines,
+      typeAnalysis
+    )
+
+    if (this.dryRun) {
+      this.displayTimeEstimate(
+        cost.applyMs,
+        cost.runMs,
+        mutations.length,
+        mutations.length
+      )
+      return this.buildDryRunResult(
+        apexClass,
+        mutations,
+        retainedTestClassNames
+      )
+    }
+
+    const groups = await this.planGroups(mutations, testMethodsPerLine)
+    this.displayTimeEstimate(
+      cost.applyMs,
+      cost.runMs,
+      mutations.length,
+      groups.length
+    )
+
+    return this.executeMutationLoopWithRollback({
+      apexClass,
+      mutations,
+      groups,
+      mutantGenerator,
+      tokenStream,
+      testMethodsPerLine,
+      retainedTestClassNames,
+    })
+  }
+
+  private async planGroups(
+    mutations: ApexMutation[],
+    testMethodsPerLine: Map<number, Set<TestMethodId>>
+  ): Promise<MutationGroup[]> {
+    if (!this.mutationGroupingEnabled) {
+      // No grouping: one mutation per group. Inlined here rather than going
+      // through groupMutations to avoid building the conflict graph for the
+      // common (default-off) case.
+      return mutations.map(m => ({
+        mutations: [m],
+        // extractCoveredLines guarantees the line is in the map.
+        testMethods: testMethodsPerLine.get(m.target.startToken.line)!,
+      }))
+    }
+
+    this.spinner.start(
+      `Grouping ${mutations.length} mutations to minimize deployments`,
+      undefined,
+      { stdout: true }
+    )
+    const {
+      groups: dsaturGroups,
+      lowerBound,
+      internals,
+    } = groupMutationsWithInternals(mutations, testMethodsPerLine)
+
+    let groups = dsaturGroups
+    const exact = solveColoring({
+      adjacency: internals.adjacency,
+      n: mutations.length,
+      lowerBound,
+      dsaturColors: dsaturGroups.length,
+      witness: internals.witness,
+      dsaturColoring: internals.coloring,
+    })
+    const decision = decideExactOutcome(exact, dsaturGroups.length)
+    const exactSuffix = decision.suffix
+    if (decision.useGroups === 'exact') {
+      groups = assembleGroups(mutations, internals.tests, exact.coloring)
+    }
+
+    // Division is safe: generateMutations throws when mutations is empty,
+    // so planGroups is never reached with mutations.length === 0.
+    const savingsPct = Math.round((1 - groups.length / mutations.length) * 100)
+    this.spinner.stop(
+      this.messages.getMessage('info.groupingPlan', [
+        String(mutations.length),
+        String(groups.length),
+        String(savingsPct),
+        String(lowerBound),
+        exactSuffix,
+      ])
+    )
+    return groups
+  }
+
+  public calculateScore(mutationResult: ApexMutationTestResult) {
+    const validMutants = mutationResult.mutants.filter(
+      mutant => mutant.status !== 'CompileError'
+    )
+    if (validMutants.length === 0) {
+      return 0
+    }
+    const killedStatuses = new Set(['Killed', 'RuntimeError'])
+    return (
+      (validMutants.filter(mutant => killedStatuses.has(mutant.status)).length /
+        validMutants.length) *
+      100
+    )
+  }
+
+  private filterTestMethods(
+    testMethodsPerLine: Map<number, Set<TestMethodId>>
+  ): Map<number, Set<TestMethodId>> {
+    const entries = this.includeTestMethods ?? this.excludeTestMethods
+
+    if (!entries) {
+      return testMethodsPerLine
+    }
+
+    // Folded: lookupKeys are folded too, and folding the filter set also
+    // makes matching case-insensitive, matching Apex identifier semantics.
+    const filterSet = new Set(entries.map(entry => entry.toLowerCase()))
+    const isInclude = Boolean(this.includeTestMethods)
+
+    const filteredPerLine = new Map<number, Set<TestMethodId>>()
+    for (const [line, methods] of testMethodsPerLine) {
+      const filtered = new Set(
+        [...methods].filter(m =>
+          isInclude
+            ? matchesFilter(m, filterSet, this.testClassResolutions)
+            : !matchesFilter(m, filterSet, this.testClassResolutions)
+        )
+      )
+      if (filtered.size > 0) {
+        filteredPerLine.set(line, filtered)
+      }
+    }
+    return filteredPerLine
+  }
+
+  private async fetchApexClass(): Promise<ApexClass> {
+    this.spinner.start(
+      `Fetching "${this.apexClassName}" ApexClass content`,
+      undefined,
+      { stdout: true }
+    )
+    const apexClass = await this.engine.source.readClass(this.apexClassName)
+    this.apexClassContent = apexClass.Body
+    this.spinner.stop('Done')
+    return apexClass
+  }
+
+  private async discoverTypes(
+    apexClass: ApexClass
+  ): Promise<TypeAnalysisResult> {
+    this.spinner.start(
+      `Analyzing class dependencies for "${this.apexClassName}"`,
+      undefined,
+      { stdout: true }
+    )
+    const { apexClasses, sObjects } =
+      await this.engine.source.listDependencies(apexClass)
+
+    // Both instances now carry populate()/getFieldType(): the apex-class
+    // instance's populate() awaits `undefined?.describe(...)` — a no-op, no
+    // query — and its getFieldType() returns undefined because it has no
+    // schema, so the matcher loop falls through to the sObject instance
+    // exactly as before. Handing the apex-class instance a schema one day
+    // would make it start answering field lookups first.
+    const apexClassMatcher = new AliasTypeMatcher(apexClasses)
+    const sObjectMatcher = new AliasTypeMatcher(sObjects, this.engine.schema)
+
+    const typeDiscoverer = new TypeDiscoverer()
+      .withMatcher(apexClassMatcher)
+      .withMatcher(sObjectMatcher)
+
+    const analysis = await typeDiscoverer.analyzeFull(apexClass.Body)
+    this.spinner.stop('Done')
+    return analysis
+  }
+
+  private async runBaselineTests(apexClass: ApexClass): Promise<{
+    testMethodsPerLine: Map<number, Set<TestMethodId>>
+    retainedTestClassNames: string[]
+    cost: Baseline['cost']
+  }> {
+    const baseline = await this.prepareBaseline(apexClass)
+    this.assertUsableBaseline(baseline)
+    const testMethodsPerLine = this.filterTestMethods(
+      baseline.testMethodsPerLine
+    )
+    const retainedTestClassNames = this.reducePerimeterFromBaseline(
+      baseline,
+      testMethodsPerLine
+    )
+    return { testMethodsPerLine, retainedTestClassNames, cost: baseline.cost }
+  }
+
+  // The bed never touches a spinner: it fires onVerifying/
+  // onVerified/onBaselineStarting and this method makes the same spinner
+  // calls the service made before prepare() fused the compile gate and the
+  // baseline run. There is deliberately no onVerifyFailed hook — the error
+  // type tells this catch which phase failed, so it makes the textless
+  // spinner.stop() itself, in the same position verifyCompilation used to.
+  private async prepareBaseline(apexClass: ApexClass): Promise<Baseline> {
+    try {
+      return await this.engine.testBed.prepare(
+        apexClass,
+        this.apexTestClassNames,
+        {
+          onVerifying: () =>
+            this.spinner.start(
+              `Verifying "${this.apexClassName}" apex class compilation`,
+              undefined,
+              { stdout: true }
+            ),
+          onVerified: () => this.spinner.stop('Done'),
+          onBaselineStarting: () =>
+            this.spinner.start(
+              `Executing "${this.testClassPerimeter}" tests to get coverage`,
+              undefined,
+              { stdout: true }
+            ),
+        }
+      )
+    } catch (error: unknown) {
+      if (error instanceof CompilationCheckFailedError) {
+        this.spinner.stop()
+        throw new Error(
+          this.messages.getMessage('error.compilabilityCheckFailed', [
+            this.apexClassName,
+            error.reason.message,
+          ])
+        )
+      }
+      throw error
+    }
+  }
+
+  // Both aborts stop the spinner before throwing — losing either leaves a
+  // spinner running on the failure path. A CompileFail row counts toward
+  // testsRan, so an all-CompileFail baseline never reaches this second
+  // guard; it is caught downstream by the empty-perimeter guard in
+  // reducePerimeterFromBaseline instead.
+  private assertUsableBaseline(baseline: Baseline): void {
+    const { outcome, testsRan, otherFailureCount } = baseline
+    if (otherFailureCount > 0) {
+      this.spinner.stop()
+      const compileSentences = formatSkippedTestClasses(
+        this.toCompileSkips(baseline.compileFailures),
+        this.messages
+      )
+      const compileDetail =
+        compileSentences.length > 0 ? `${compileSentences.join('\n')}\n` : ''
+      throw new Error(
+        `Original tests failed! Cannot proceed with mutation testing.\n` +
+          `Test outcome: ${outcome}\n` +
+          `Failing tests: ${otherFailureCount}\n` +
+          compileDetail
+      )
+    }
+
+    if (testsRan === 0) {
+      this.spinner.stop()
+      throw new Error(
+        `No tests were executed! Check that:\n` +
+          `- Test class(es) '${this.testClassPerimeter}' exist\n` +
+          `- Test methods have @IsTest annotation\n` +
+          `- Test class(es) are properly deployed`
+      )
+    }
+  }
+
+  private stopBaselineSpinner(fidelity: Baseline['fidelity']): void {
+    this.spinner.stop(
+      fidelity === 'aggregate'
+        ? `Original tests passed (${this.messages.getMessage('info.aggregatedCoverageOnly')})`
+        : 'Original tests passed'
+    )
+  }
+
+  // Stops the same spinner without claiming a pass, for the path where every
+  // class failed to compile: no test ran, so there is nothing to have passed.
+  private abandonBaselineSpinner(): void {
+    this.spinner.stop()
+  }
+
+  // The two drops and the guard, in order: a class that cannot compile never
+  // ran a test, so it is dropped before zero-contribution is even computed.
+  // If every class drops here, error.noUsableTestClass is the truthful
+  // failure — error.noCoverage would name a perimeter that simply never
+  // compiled, not one that ran and covered nothing.
+  //
+  // Three constraints pin the spinner handling, and they only reconcile if the
+  // TEXT is conditional rather than the ordering. The notices must precede the
+  // throw, or an all-CompileFail run never says which classes broke. The
+  // spinner must stop before the notices, because announcing stops it too and
+  // stopping an already-stopped spinner renders nothing — that would swallow
+  // the pass line whenever only some classes failed. And the pass text must
+  // not appear when nothing survived: an all-CompileFail baseline reports
+  // otherFailureCount === 0 and testsRan > 0, since CompileFail rows count
+  // toward testsRan, so it would claim a pass that never happened.
+  private reducePerimeterFromBaseline(
+    baseline: Baseline,
+    testMethodsPerLine: Map<number, Set<TestMethodId>>
+  ): string[] {
+    const compileSkips = this.toCompileSkips(baseline.compileFailures)
+    const compileSentences = formatSkippedTestClasses(
+      compileSkips,
+      this.messages
+    )
+    const compiling = reducePerimeter(this.apexTestClassNames, compileSkips)
+    if (compiling.length === 0) {
+      this.abandonBaselineSpinner()
+      this.announceSkips(compileSentences)
+      throw this.messages.createError('error.noUsableTestClass', [
+        this.apexClassName,
+        compileSentences.join('\n'),
+      ])
+    }
+    this.stopBaselineSpinner(baseline.fidelity)
+    this.announceSkips(compileSentences)
+
+    const silent =
+      baseline.fidelity === 'per-test'
+        ? this.findZeroContributionTestClasses(compiling, testMethodsPerLine)
+        : []
+    this.announceSkips(formatSkippedTestClasses(silent, this.messages))
+    return reducePerimeter(compiling, silent)
+  }
+
+  // Walking the perimeter (rather than the failures) emits the perimeter
+  // entry's own spelling, renders warnings in perimeter order like every
+  // other drop, and avoids a non-null assertion on a lookup that can only
+  // miss in a state the platform cannot produce. The failure's classId is
+  // resolved outward through the run's resolutions map to the folded
+  // spellings it answers to; a classId absent from that map contributes no
+  // keys, so its class is simply not skipped here rather than guarded
+  // defensively — a guard would be a branch no fixture can reach.
+  private toCompileSkips(
+    failures: BaselineCompileFailure[]
+  ): SkippedTestClass[] {
+    const detailByKey = new Map<string, string>()
+    for (const failure of failures) {
+      const keys =
+        // Stryker disable next-line ArrayDeclaration: detailByKey is only
+        // ever queried via .get(name.toLowerCase()); the injected
+        // uppercase key can never match.
+        this.testClassResolutions.get(failure.classId)?.lookupKeys ?? []
+      // Last-write-wins: two failing classIds can share a lookup key when
+      // an own-namespace row and a namespace-less installed row both answer
+      // to the same bare name (orgApexSourceProvider's spellingsOf mints
+      // that bare key from both), in which case the later failure's message
+      // silently overwrites the earlier one for that key.
+      for (const key of keys) detailByKey.set(key, failure.message)
+    }
+    const skips = this.apexTestClassNames.flatMap(name => {
+      const detail = detailByKey.get(name.toLowerCase())
+      return detail === undefined
+        ? []
+        : [{ className: name, reason: 'does-not-compile' as const, detail }]
+    })
+    return attachSuiteProvenance(skips, this.testClassOrigins)
+  }
+
+  // AggregateCoverageStrategy has no per-test attribution, so this diff
+  // only makes sense — and is only computed — under per-test fidelity.
+  // Diffs against the compile-reduced perimeter, so a class that failed to
+  // compile is never also reported as contributing nothing. Each
+  // contributing classId is resolved outward through the run's resolutions
+  // map to the folded spellings it answers to, so two perimeter entries
+  // sharing one bare name but backed by different class ids resolve
+  // independently — a name-based join could not tell them apart.
+  private findZeroContributionTestClasses(
+    perimeter: string[],
+    testMethodsPerLine: Map<number, Set<TestMethodId>>
+  ): SkippedTestClass[] {
+    const contributing = new Set(
+      [...testMethodsPerLine.values()]
+        .flatMap(methods => [...methods])
+        .map(testClassOf)
+    )
+    const keys = new Set(
+      [...contributing].flatMap(
+        // Stryker disable next-line ArrayDeclaration: this set is only
+        // ever queried via .has(name.toLowerCase()); the injected
+        // uppercase entry can never match.
+        classId => this.testClassResolutions.get(classId)?.lookupKeys ?? []
+      )
+    )
+    const silent = perimeter
+      .filter(name => !keys.has(name.toLowerCase()))
+      .map(className => ({ className, reason: 'no-coverage' as const }))
+    return attachSuiteProvenance(silent, this.testClassOrigins)
+  }
+
+  private announceSkips(sentences: string[]): void {
+    for (const sentence of sentences) {
+      this.spinner.start(sentence, undefined, { stdout: true })
+      this.spinner.stop()
+    }
+  }
+
+  private extractCoveredLines(
+    testMethodsPerLine: Map<number, Set<TestMethodId>>
+  ): Set<number> {
+    const coveredLines = new Set(testMethodsPerLine.keys())
+    if (coveredLines.size === 0) {
+      throw new Error(
+        this.messages.getMessage('error.noCoverage', [
+          this.apexClassName,
+          this.testClassPerimeter,
+        ])
+      )
+    }
+    return coveredLines
+  }
+
+  private generateMutations(
+    apexClass: ApexClass,
+    coveredLines: Set<number>,
+    typeAnalysis: TypeAnalysisResult
+  ): {
+    mutations: ApexMutation[]
+    mutantGenerator: MutantGenerator
+    tokenStream: CommonTokenStream
+  } {
+    this.spinner.start(
+      `Generating mutants for "${this.apexClassName}" ApexClass`,
+      undefined,
+      { stdout: true }
+    )
+    const mutantGenerator = new MutantGenerator(this.messages)
+    const mutatorFilter = this.buildMutatorFilter()
+    const { mutations, tokenStream } = mutantGenerator.compute(
+      apexClass.Body,
+      coveredLines,
+      typeAnalysis.typeRegistry,
+      mutatorFilter,
+      this.skipPatterns,
+      this.allowedLines,
+      { tree: typeAnalysis.tree, tokenStream: typeAnalysis.tokenStream }
+    )
+
+    if (mutations.length === 0) {
+      this.spinner.stop('0 mutations generated')
+      throw this.buildNoMutationsError(coveredLines, mutatorFilter)
+    }
+
+    this.spinner.stop(`${mutations.length} mutations generated`)
+    return { mutations, mutantGenerator, tokenStream }
+  }
+
+  // An empty mutation set is almost never "the mutators found nothing" — far
+  // more often one of the user's own filters emptied the candidate set first.
+  // Naming the filter that did it turns a dead end into an actionable message.
+  private buildNoMutationsError(
+    coveredLines: Set<number>,
+    mutatorFilter: MutatorFilter | undefined
+  ): Error {
+    const diagnosis = diagnoseNoMutations({
+      coveredLines,
+      allowedLines: this.allowedLines,
+      skipPatterns: this.skipPatterns,
+      sourceLines: this.apexClassContent.split('\n'),
+      // Asks the generator whether the registry actually shrank, rather than
+      // re-deriving it here: an empty list and a list of unknown names both
+      // leave every mutator enabled, and neither should be blamed.
+      mutatorFilterActive: mutatorFilterNarrows(mutatorFilter),
+    })
+
+    switch (diagnosis.reason) {
+      case 'line-range':
+        return new Error(
+          this.messages.getMessage('error.noMutationsInLineRange', [
+            this.apexClassName,
+            diagnosis.coveredCount,
+            this.requestedLines.join(', '),
+          ])
+        )
+      case 'skip-patterns':
+        return new Error(
+          this.messages.getMessage('error.noMutationsAfterSkipPatterns', [
+            this.apexClassName,
+            diagnosis.inRangeCount,
+          ])
+        )
+      case 'mutator-filter':
+        return new Error(
+          this.messages.getMessage('error.noMutationsForMutatorFilter', [
+            this.apexClassName,
+            diagnosis.eligibleCount,
+          ])
+        )
+      // Listed explicitly rather than via `default:` so a future variant
+      // fails to compile instead of silently rendering the generic message.
+      case 'no-mutable-pattern':
+        return new Error(
+          this.messages.getMessage('error.noMutations', [
+            this.apexClassName,
+            diagnosis.eligibleCount,
+          ])
+        )
+    }
+  }
+
+  private buildMutatorFilter():
+    | { include: string[] }
+    | { exclude: string[] }
+    | undefined {
+    if (this.includeMutators) return { include: this.includeMutators }
+    if (this.excludeMutators) return { exclude: this.excludeMutators }
+    return undefined
+  }
+
+  private displayTimeEstimate(
+    deployTime: number,
+    testTime: number,
+    mutationCount: number,
+    groupCount: number
+  ): void {
+    const totalEstimateMs = (deployTime + testTime) * groupCount
+    this.spinner.start(
+      this.messages.getMessage('info.timeEstimate', [
+        formatDuration(totalEstimateMs),
+      ]),
+      undefined,
+      { stdout: true }
+    )
+    this.spinner.stop(
+      this.messages.getMessage('info.timeEstimateBreakdown', [
+        formatDuration(deployTime),
+        formatDuration(testTime),
+        String(mutationCount),
+        String(groupCount),
+      ])
+    )
+  }
+
+  private buildDryRunResult(
+    apexClass: ApexClass,
+    mutations: ApexMutation[],
+    retainedTestClassNames: string[]
+  ): ApexMutationTestResult {
+    return {
+      sourceFile: this.apexClassName,
+      sourceFileContent: apexClass.Body,
+      testFiles: retainedTestClassNames,
+      testClassResolutions: [...this.testClassResolutions.values()],
+      mutants: mutations.map(mutation => ({
+        id: `${this.apexClassName}-${mutation.target.startToken.line}-${mutation.target.startToken.charPositionInLine}-${mutation.target.startToken.tokenIndex}-${Date.now()}`,
+        mutatorName: mutation.mutationName,
+        status: 'Pending' as const,
+        location: calculateMutationPosition(mutation),
+        replacement: mutation.replacement,
+        original: extractMutationOriginalText(mutation, this.apexClassContent),
+      })),
+    }
+  }
+
+  private async executeMutationLoop(
+    context: MutationLoopContext
+  ): Promise<ApexMutationTestResult> {
+    const {
+      apexClass,
+      mutations,
+      groups,
+      mutantGenerator,
+      tokenStream,
+      testMethodsPerLine,
+      retainedTestClassNames,
+    } = context
+
+    this.progress.start(
+      mutations.length,
+      { info: 'Starting mutation testing' },
+      {
+        title: 'MUTATION TESTING PROGRESS',
+        format: '%s | {bar} | {value}/{total} {info}',
+      }
+    )
+
+    const executor = new GroupExecutor(
+      this.apexClassName,
+      this.apexClassContent,
+      tokenStream,
+      testMethodsPerLine,
+      mutantGenerator,
+      this.engine.testBed,
+      this.progress,
+      this.messages
+    )
+
+    const indexByMutation = new Map(mutations.map((m, i) => [m, i]))
+    // Pre-filling with null only makes the holes explicit: every index is
+    // written below, and null slots and array holes are both skipped
+    // identically by the `filter` at the end.
+    type MutantResult = ApexMutationTestResult['mutants'][number]
+    // Stryker disable next-line ArrayDeclaration: pre-fill is not observable.
+    const orderedResults: Array<MutantResult | null> = new Array(
+      mutations.length
+    ).fill(null)
+    let completed = 0
+    const loopStartTime = performance.now()
+
+    for (const group of groups) {
+      const mutantResults = await executor.evaluate(
+        group,
+        completed,
+        loopStartTime,
+        mutations.length
+      )
+      // Stryker disable next-line EqualityOperator: an extra iteration reads
+      // `group.mutations[length]` as undefined, whose index lookup writes a
+      // non-index property that `filter` never visits.
+      for (let i = 0; i < group.mutations.length; ++i) {
+        const idx = indexByMutation.get(group.mutations[i])!
+        orderedResults[idx] = mutantResults[i]
+      }
+      completed += group.mutations.length
+    }
+
+    this.progress.finish({ info: 'All mutations evaluated' })
+    return {
+      sourceFile: this.apexClassName,
+      sourceFileContent: apexClass.Body,
+      testFiles: retainedTestClassNames,
+      testClassResolutions: [...this.testClassResolutions.values()],
+      // Stryker disable next-line MethodExpression: no null slots remain, so
+      // filtering and not filtering yield the same array — see `isPresent`.
+      mutants: orderedResults.filter(isPresent),
+    }
+  }
+
+  // The org holds a mutated body from the first group deploy until rollback
+  // redeploys the original, so the restore must survive every exit of the loop,
+  // not only the resolving one. Not a `finally`: a finally that raises replaces
+  // the loop's rejection with its own, destroying the root cause.
+  private async executeMutationLoopWithRollback(
+    context: MutationLoopContext
+  ): Promise<ApexMutationTestResult> {
+    let result: ApexMutationTestResult
+    try {
+      result = await this.executeMutationLoop(context)
+    } catch (loopError: unknown) {
+      // The bar the loop owns stopped moving when the loop died. Tearing it
+      // down here, next to the failure it answers, leaves a single renderer
+      // drawing while the rollback spinner runs.
+      this.stopProgress()
+      throw await this.rollbackAfterLoopFailure(loopError)
+    }
+    await this.rollback()
+    return result
+  }
+
+  // Reaching the restore is the whole point of the guard, so a renderer
+  // teardown failure must not pre-empt it — hence reported, not propagated.
+  // The two channels are deliberately different file descriptors: cli-progress
+  // draws the bar on stderr, while the sink writes to stdout, so whatever
+  // broke the bar cannot also swallow the report. Keep them apart; routing
+  // this warning to stderr to "match" the bar would couple them and let a dead
+  // stream skip the restore after all.
+  //
+  // The detail here is raised by this process, not by the org — a renderer
+  // teardown failure — so it needs only the control-byte fold, not the length
+  // bound renderOrgDetail applies to org-supplied text. Do not "align" it with
+  // the sibling call sites: truncating a plugin-local teardown diagnostic at
+  // 200 code points would clip it on the one path where the rollback outcome
+  // must stay legible.
+  private stopProgress(): void {
+    try {
+      this.progress.stop()
+    } catch (error: unknown) {
+      this.outputSink(
+        `${PROGRESS_TEARDOWN_WARNING} ${sanitizeForDisplay(String(error))}\n`
+      )
+    }
+  }
+
+  // Returns the error for the caller to throw rather than throwing itself, so
+  // the `throw` stays at the call site and the method keeps a nameable return
+  // type instead of a `never` that TypeScript does not narrow through `await`.
+  private async rollbackAfterLoopFailure(loopError: unknown): Promise<unknown> {
+    try {
+      // The run is already lost, and this restore is often attempted against
+      // an org that has just exhausted its test quota — so it skips the test
+      // run, making it the cheapest request the plugin can issue. The success
+      // path keeps the default and leaves the org's coverage recomputed for
+      // the real class.
+      await this.rollback(SKIP_TESTS)
+      return loopError
+    } catch (rollbackError: unknown) {
+      // The loop failure is the root cause and leads the message; the rollback
+      // failure is appended so "the class is still mutated on the org" reaches
+      // stderr as well as --json. String(rollbackError) is deliberately
+      // unguarded: rollback only ever raises the Error it builds itself, so an
+      // instanceof guard would add an arm no test could reach.
+      //
+      // Flattening to a plain Error drops any name/code/actions the loop error
+      // carried, which SfCommandError.from reads off the thrown error rather
+      // than the cause chain. That is safe only because nothing org-derived
+      // escapes the loop: GroupExecutor wraps its only two org calls, the
+      // mutant deploy and the test run, and classifies their failures per
+      // mutant. What does escape — a mutateMany throw, a progress update — is
+      // plugin-local and carries no name/code/actions. Throwing a structured
+      // error out of the loop would break this.
+      const loopMessage =
+        loopError instanceof Error ? loopError.message : String(loopError)
+      return new Error(`${loopMessage}\n${String(rollbackError)}`, {
+        cause: loopError,
+      })
+    }
+  }
+
+  private async rollback(testPolicy: RestorePolicy = RUN_TESTS): Promise<void> {
+    this.spinner.start(
+      `Rolling back "${this.apexClassName}" ApexClass to its original state`,
+      undefined,
+      { stdout: true }
+    )
+    try {
+      await this.engine.testBed.restore(testPolicy)
+      this.spinner.stop('Done')
+    } catch (error: unknown) {
+      this.spinner.stop(
+        `Rollback FAILED — '${this.apexClassName}' remains in a mutated state on the target org. Redeploy the original class manually.`
+      )
+      // The cause is the raw org/network failure, so it is unbounded and can
+      // carry control bytes — folded and length-bounded like every other
+      // org-supplied detail this service renders. The actionable sentence goes
+      // last so no amount of org text can push it off screen.
+      const cause = renderOrgDetail(
+        error instanceof Error ? error.message : String(error)
+      )
+      throw new Error(
+        `Rollback of '${this.apexClassName}' failed. Underlying cause: ${cause}. The class on the target org is still in a mutated state. Redeploy manually.`
+      )
+    }
+  }
+}

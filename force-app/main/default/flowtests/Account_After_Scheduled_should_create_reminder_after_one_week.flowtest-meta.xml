@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<FlowTest xmlns="http://soap.sforce.com/2006/04/metadata">
+    <flowApiName>Account_After</flowApiName>
+    <label>Scheduled - should create reminder after one week</label>
+    <testPoints>
+        <elementApiName>Start</elementApiName>
+        <isUseMockOutput>false</isUseMockOutput>
+        <parameters>
+            <leftValueReference>$Record</leftValueReference>
+            <type>InputTriggeringRecordInitial</type>
+            <value>
+                <sobjectValue>{&quot;CleanStatus&quot;:&quot;Pending&quot;,&quot;Name&quot;:&quot;Test Acc&quot;,&quot;OwnerId&quot;:&quot;005d200000ET1ThAAL&quot;}</sobjectValue>
+            </value>
+        </parameters>
+        <parameters>
+            <leftValueReference>ScheduledPathApiName</leftValueReference>
+            <type>ScheduledPath</type>
+            <value>
+                <stringValue>After_one_week</stringValue>
+            </value>
+        </parameters>
+    </testPoints>
+    <testPoints>
+        <assertions>
+            <conditions>
+                <leftValueReference>Check_KRS_completion</leftValueReference>
+                <operator>WasVisited</operator>
+                <rightValue>
+                    <booleanValue>true</booleanValue>
+                </rightValue>
+            </conditions>
+        </assertions>
+        <assertions>
+            <conditions>
+                <leftValueReference>Create_KRS_check_Tasks</leftValueReference>
+                <operator>HasError</operator>
+                <rightValue>
+                    <booleanValue>false</booleanValue>
+                </rightValue>
+            </conditions>
+        </assertions>
+        <elementApiName>Finish</elementApiName>
+        <isUseMockOutput>false</isUseMockOutput>
+    </testPoints>
+    <testType>WithAssertion</testType>
+</FlowTest>

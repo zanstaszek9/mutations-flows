@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<FlowTest xmlns="http://soap.sforce.com/2006/04/metadata">
+    <flowApiName>Account_Before</flowApiName>
+    <flowTestDataSources>
+        <apexClass>FlowDataAccountTest</apexClass>
+        <dataSourceType>ApexClass</dataSourceType>
+    </flowTestDataSources>
+    <flowTestFlowVersions>
+        <flowVersionNumber>1</flowVersionNumber>
+    </flowTestFlowVersions>
+    <flowTestFlowVersions>
+        <flowVersionNumber>2</flowVersionNumber>
+    </flowTestFlowVersions>
+    <flowTestFlowVersions>
+        <flowVersionNumber>3</flowVersionNumber>
+    </flowTestFlowVersions>
+    <isolatedObjectExternalKeys>
+        <keyFields>
+            <fieldName>Name</fieldName>
+        </keyFields>
+        <keyFields>
+            <fieldName>Rating</fieldName>
+        </keyFields>
+        <objectType>Account</objectType>
+    </isolatedObjectExternalKeys>
+    <label>Should set Rating from Parent Data Silo</label>
+    <testPoints>
+        <elementApiName>Start</elementApiName>
+        <isUseMockOutput>false</isUseMockOutput>
+        <parameters>
+            <leftValueReference>$Record</leftValueReference>
+            <type>InputTriggeringRecordInitial</type>
+            <value>
+                <jsonValue>{&quot;fields&quot;:{&quot;Name&quot;:&quot;Test Account Child&quot;,&quot;Rating&quot;:null},&quot;attributes&quot;:{&quot;type&quot;:&quot;Account&quot;}}</jsonValue>
+            </value>
+        </parameters>
+    </testPoints>
+    <testPoints>
+        <assertions>
+            <conditions>
+                <leftValueReference>$Record.Rating</leftValueReference>
+                <operator>EqualTo</operator>
+                <rightValue>
+                    <stringValue>Warm</stringValue>
+                </rightValue>
+            </conditions>
+            <errorMessage>Account Rating was set incorrectly</errorMessage>
+        </assertions>
+        <assertions>
+            <conditions>
+                <leftValueReference>Set_Rating_from_Parent</leftValueReference>
+                <operator>WasVisited</operator>
+                <rightValue>
+                    <booleanValue>true</booleanValue>
+                </rightValue>
+            </conditions>
+            <errorMessage>Expected block was not visited: Set_Rating_from_Parent</errorMessage>
+        </assertions>
+        <elementApiName>Finish</elementApiName>
+        <isUseMockOutput>false</isUseMockOutput>
+    </testPoints>
+    <testType>WithAssertion</testType>
+</FlowTest>

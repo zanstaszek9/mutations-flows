@@ -1,0 +1,612 @@
+# Apex Mutation Testing
+
+[![NPM](https://img.shields.io/npm/v/apex-mutation-testing.svg?label=apex-mutation-testing)](https://www.npmjs.com/package/apex-mutation-testing) [![Downloads/week](https://img.shields.io/npm/dw/apex-mutation-testing.svg)](https://npmjs.org/package/apex-mutation-testing) [![License](https://img.shields.io/badge/license-MIT-blue.svg)](https://raw.githubusercontent.com/scolladon/apex-mutation-testing/main/LICENSE.md)
+[![Performance](https://img.shields.io/badge/Performance-Dashboard-58a6ff)](https://scolladon.github.io/apex-mutation-testing/dev/bench/runtime/)
+![GitHub Sponsors](https://img.shields.io/github/sponsors/scolladon)
+
+## Disclaimer
+
+This project is in its early stages and requires further development.
+It provides a solid foundation for implementing additional features and improvements.
+You are welcome to contribute by logging issue, proposing enhancements or pull requests.
+
+## TL;DR
+
+```sh
+sf plugins install apex-mutation-testing
+```
+
+```sh
+sf apex mutation test run --apex-class MyClass --test-class MyClassTest
+```
+
+## What is it mutation testing ?
+
+Mutation testing is a software testing technique that evaluates the quality of your test suite by introducing small changes (mutations) to your code and checking if your tests can detect these changes. It helps identify weaknesses in your test coverage by measuring how effectively your tests can catch intentional bugs. cf [wikipedia](https://en.wikipedia.org/wiki/Mutation_testing) 
+
+The apex-mutation-testing plugin implements this technique for Salesforce Apex code by:
+
+1. Parsing your Apex class to identify potential mutation points
+2. Generating mutated versions of your code with specific changes
+3. Deploying each mutated version to a Salesforce org
+4. Running your test class(es) against each mutation
+5. Analyzing the results to determine if your tests:
+   - Detected the mutation (killed the mutant)
+   - Failed to detect the mutation (created a zombie)
+   - Caused a test failure unrelated to the mutation
+6. Generating a detailed report showing mutation coverage and test effectiveness
+
+This process helps you identify areas where your tests may be insufficient and provides insights into improving your test quality.
+
+cf this [idea](https://ideas.salesforce.com/s/idea/a0B8W00000GdmxmUAB/use-mutation-testing-to-stop-developers-from-cheating-on-apex-tests) for more information about the community appetit
+
+## How to use it?
+
+Fast unit tests are crucial for mutation testing as each detected mutation is deployed and tested individually. The plugin generates numerous mutations, and having quick-running tests allows for:
+
+1. Efficient execution of the mutation testing process
+2. Faster feedback on test coverage quality
+3. Ability to test more mutations within time constraints
+4. Reduced resource consumption during testing
+5. More iterations and improvements in test quality
+
+The more the test interacts with the database (dml or soql) the more times the test will take
+
+### Test Coverage Requirements
+
+To maximize the benefits of mutation testing, your test class(es) should have very high code coverage (ideally 100%) **AND** meaningful assert. Here's why:
+
+1. **Accurate Metrics**: High coverage ensures the mutation score accurately reflects your test suite's effectiveness.
+
+2. **Meaningful Results**: With high coverage, the mutation test results provide actionable insights about your test quality.
+
+3. **Mutation Detection**: Mutations detection can be optimized by being scoped to code that is executed by your tests. Uncovered code means not relevant mutations for your tests.
+
+Before running mutation testing:
+
+- Ensure your test class(es) achieve maximum coverage
+- Verify all critical paths are tested
+- Include edge case scenarios
+- Validate test assertions are comprehensive
+
+Remember, mutation testing complements but doesn't replace good test coverage. It helps identify weaknesses in your existing tests, but only for the code they already cover.
+
+#### Aggregated Code Coverage Orgs
+
+Some orgs enable **"Store Only Aggregated Code Coverage"** (Setup → Apex Test Execution → Options). With this setting on, Salesforce discards per-test coverage and only retains an org-wide, cumulative coverage rollup.
+
+The plugin detects this automatically by querying `ApexSettings.IsAggregateCodeCoverageOnlyEnabled` via the Tooling API, and switches to aggregate coverage without requiring any flag. Two caveats apply when this mode is active:
+
+- **Slower**: without per-test coverage, every test method runs for every mutant, instead of only the tests that cover the mutated line.
+- **Score may be understated**: the aggregate coverage is a cumulative org-wide rollup, so lines covered only by other test classes still count as "covered" but their mutants can never be killed by your test class(es) alone, surfacing as unkillable surviving mutants.
+- **Coarser report attribution**: without per-test coverage, the report's `coveredBy`/`killedBy` are class-level rather than method-level — every test class in the perimeter is listed against every mutant it could have run, not the specific method responsible.
+
+**Tip**: use "Clear test data" in Apex Test Execution before running mutation testing to reset the aggregate coverage rollup and get a truer score.
+
+### Dry Run
+
+Before running the full mutation testing process, you can preview the mutations that would be generated using the `--dry-run` flag:
+
+```sh
+sf apex mutation test run --apex-class MyClass --test-class MyClassTest --dry-run
+```
+
+This runs your test class(es) once to collect coverage data, then lists all mutations that would be generated without deploying any of them. Use it to estimate the scope of mutation testing for your class and verify that relevant mutations are being generated for your code patterns.
+
+In both normal and dry-run modes, the plugin displays a time estimate before starting the mutation loop, showing the estimated total duration along with a per-mutant breakdown of deployment and test execution time.
+
+### Compilability Verification
+
+Before running mutation tests, the plugin deploys the target class to verify it compiles correctly. This step is necessary because Salesforce only validates compilation of the element being deployed, not its dependents. A class can exist on the org in a broken state if one of its dependencies was modified after it was last deployed.
+
+Without this check, all mutants would result in `CompileError`, producing a misleading 100% mutation score. If the target class fails to compile, the process stops early with a clear error message with its compilation details.
+
+This verification also serves as a baseline to measure deployment time, which is used to estimate the total mutation testing duration.
+
+The test-class perimeter is not pre-verified this way: the plugin no longer deploys it up front to prove it compiles. That your test classes compile is a prerequisite you're expected to satisfy — a class that doesn't is instead reported by the baseline test run itself and skipped, rather than aborting the whole command. See [Unusable Test Classes](#unusable-test-classes).
+
+### Multiple Test Classes
+
+A single Apex class is often covered by more than one test class. Pass `--test-class` (`-t`) multiple times, as a comma-delimited list, or mix both — the perimeter is the union either way:
+
+```sh
+sf apex mutation test run --apex-class MyClass --test-class MyClassTest --test-class MyClassTest2
+sf apex mutation test run --apex-class MyClass --test-class MyClassTest,MyClassTest2
+```
+
+Names are trimmed, blank entries are rejected, and duplicates are removed case-insensitively (keeping the first spelling you used) before the org is contacted.
+
+Coverage is the union of every class in the perimeter: a mutation only runs the test methods — from any class — that actually cover its line, and kill/survive results are attributed correctly even when two classes declare a method with the same name. A class in the perimeter that can't be used is named in a warning and dropped rather than aborting the run — see [Unusable Test Classes](#unusable-test-classes).
+
+### Test Suites
+
+A class can also be covered by an Apex test suite. Pass `--test-suite` multiple times, as a comma-delimited list, or mix both — like `--test-class`, the perimeter is the union either way:
+
+```sh
+sf apex mutation test run --apex-class MyClass --test-suite MyTestSuite
+sf apex mutation test run --apex-class MyClass --test-class MyClassTest --test-suite MyTestSuite
+```
+
+`--test-class` and `--test-suite` union into one perimeter, and at least one of them is required — passing neither is an error naming both flags. Unlike class names, suite names are case-sensitive: the org matches them exactly, so a wrong-case name fails as "not found". An empty suite (no member classes) and an unknown suite are told apart, and both fail before any deploy or test run. Perimeter order is the `--test-class` entries first, then the suites in the order you named them, each suite's members ordered by class name. A suite member that can't be used goes through the same reduction as a `--test-class` entry — see [Unusable Test Classes](#unusable-test-classes) — and its warning additionally names the contributing suite(s).
+
+### Namespaced Orgs
+
+`--apex-class` and `--test-class` each accept a bare class name (`MyClass`) or one
+namespace-qualified with a dot (`ns.MyClass`). A bare name reaches only the namespace that
+owns it — no namespace, in a non-namespaced org; that org's own namespace, in a namespaced
+one — so a class in a foreign namespace must be named explicitly with its qualified
+spelling. The object-record convention `ns__MyClass` is rejected with a message pointing at
+the dotted form instead.
+
+Whether a class can be mutated depends on its manageability, not its namespace: a
+namespaced class in an editable or unlocked-package state is still mutable, while a
+bare-named class in a closed managed package is not. See [Unusable Test
+Classes](#unusable-test-classes) below for how the plugin reports a test class it can't use
+for either reason.
+
+### Unusable Test Classes
+
+A perimeter test class that can't be used doesn't abort the run: it's named in a warning and dropped from the perimeter, and the run proceeds with whatever remains. Five reasons are told apart:
+
+| Reason                             | Discovered by                                   |
+| ----------------------------------- | ------------------------------------------------ |
+| it could not be found on this org   | one batched pre-run query                        |
+| it is accessible on this org only under a qualified spelling — re-run naming the qualified spelling | the same pre-run query |
+| it is not accessible on this org    | the same pre-run query                           |
+| it does not compile                 | the baseline test run                            |
+| it contributed no covered lines     | the baseline test run (per-test coverage only)   |
+
+The middle two are easy to conflate but mean opposite things: "only under a qualified
+spelling" means the class exists and is usable — you just have to rerun naming it
+`ns.ClassName`. "Not accessible" means the class exists but isn't modifiable at all (e.g. a
+managed package this org doesn't own) — no rerun fixes it.
+
+Each warning names the class, the reason, and — when the class was contributed by `--test-suite` rather than typed directly via `--test-class` — the suite(s) it came from.
+
+<!-- cspell:ignore MyClasTest -- a deliberately misspelled class name; it is the example -->
+This means a mistyped `--test-class` or `--test-suite` member no longer fails the command by itself: `-t NotATestClass`, or a typo like `-t MyClasTest`, now warns and continues instead of aborting. The run fails only once the reduction leaves no usable test class at all, and that failure restates every class that was skipped and why — so a perimeter that's entirely mistyped still surfaces as a clear error rather than a confusing "no coverage" message.
+
+### Test Setup Methods
+
+A `@TestSetup` method can't be re-run on its own — Salesforce only executes it as part of a full test class run — so the plugin never targets it as an individually re-runnable test. It's excluded from the baseline's test-method inventory and never receives its own coverage or mutant attribution; its side effects still run normally as part of every other test method's setup.
+
+### Synchronous Test Execution
+
+Asynchronous test runs draw on the org's `DailyAsyncApexTests` limit (500 per rolling 24h). A mutation testing campaign is inherently test-run-heavy — one run per mutation group, plus the baseline — so a perimeter scoped to a single Apex class can exhaust that limit within a single run. There is no synchronous counterpart limit, and while the async limit is exhausted, `sf apex run test` fails **org-wide**, for every class, with `UNKNOWN_EXCEPTION` — a failure mode that reads as a plugin bug, not a quota.
+
+To avoid that, a run whose payload names exactly one Apex class — including the baseline, whenever the mutation perimeter resolves to a single class — goes through the synchronous Tooling resource instead of the asynchronous one, always. A perimeter naming two or more classes stays asynchronous. Class count is the whole predicate: there's no method-count cap and no duration estimate, and no flag to turn this on or off.
+
+On a class covered by a single test class, this means the **entire** run — baseline and every mutant — costs **zero** `DailyAsyncApexTests` units. Measured against a real org: 12 synchronous runs consumed zero async units, while 3 asynchronous runs consumed exactly 3.
+
+Synchronous execution requires the **View Setup** user permission, which the asynchronous path never needed. If your org user permanently lacks it, the plugin pays exactly one wasted synchronous round-trip for the whole campaign, then skips the synchronous attempt for every later single-class run — the baseline and each mutant — falling back straight to the asynchronous transport. A transient failure (a lock contention, a momentary 503) is retried on the synchronous transport on the next call instead, since it can recover on its own. Either way, the plugin reports the reason only once, the first time it happens, rather than on every fallback.
+
+### Local Execution With aer
+
+Mutation testing is the worst case for a Salesforce org: one deployment and one test run **per mutant**, hundreds of times, against a remote system with governor limits and API quotas. [aer](https://aertest.com) is a local Apex runtime from October Swimmer, and `aer server` exposes a Salesforce-compatible API — so the plugin can run against it with **no flag and no change in how you invoke it**.
+
+Point `-o` at a local server instead of an org:
+
+```bash
+# 1. Serve your local source (in its own terminal)
+aer server force-app/
+
+# 2. Authenticate to it once, like any other org (browser-based; see CI variant below)
+sf org login web -r http://127.0.0.1:8080 -a aer-local
+
+# 3. Run mutation testing against that alias
+sf apex mutation test run -o aer-local -c MyClass -t MyClass_Test
+```
+
+Two things make this worth doing:
+
+**It is dramatically faster.** A 57-mutant campaign that takes minutes against an org completes in about **13 seconds** locally — roughly 0s per deployment and 1s per test run. Nothing is queued, nothing is throttled, and no `DailyAsyncApexTests` units are consumed.
+
+**It mutates your working tree.** Org mode can only mutate what the org already has, so code you have not deployed cannot be tested. `aer server` loads your local source, which means work in progress is testable — and because mutations are applied through the API into the server's own state, **your files are never modified**. Interrupting a run cannot leave a mutated class on disk.
+
+#### Authenticating without a browser
+
+`sf org login web` opens a browser. That is fine on your machine, and impossible in CI. `aer server` can seed a session token at startup, which reduces authentication to two non-interactive commands:
+
+```bash
+# 1. Serve your source with a known session token
+export AER_SEED_SESSION_TOKEN='00D000000000000!ci'
+aer server force-app/
+
+# 2. Store it as an org alias — no browser, no prompt
+SF_ACCESS_TOKEN="$AER_SEED_SESSION_TOKEN" \
+  sf org login access-token -r http://127.0.0.1:8080 -a aer-local --no-prompt
+
+# 3. Run mutation testing against that alias
+sf apex mutation test run -o aer-local -c MyClass -t MyClass_Test
+```
+
+The token must be `00D000000000000!` followed by letters, digits, underscores or periods. Both tools read it from the environment — `aer server` from `AER_SEED_SESSION_TOKEN` (or its `--seed-session-token` flag), `sf` from `SF_ACCESS_TOKEN` — so the value never has to appear on a command line or in a process list.
+
+It is a throwaway credential for a server bound to `127.0.0.1`: there is nothing to protect and nothing to rotate. `sf` will warn that `http:` is an insecure protocol, which is expected for a loopback address.
+
+#### Compiler parity
+
+aer's compiler is an independent implementation of Salesforce's, and mutation testing exercises it unusually hard: a mutation tool deliberately generates invalid code, so every mutant is a compiler strictness test. Divergence lands straight in the score, because `CompileError` mutants are excluded from the denominator.
+
+Use **aer v1.3.12 or later**, where our E2E fixture scores identically against a local server and against an org — all 57 mutants, status for status.
+
+That parity is verified on one fixture, not guaranteed for every Apex construct. The number you publish or gate on should still come from an org, and a local run that disagrees with an org run on a mutant's status is [an aer bug worth reporting](https://github.com/octoberswimmer/aer-dist/issues).
+
+#### Licensing
+
+`aer server` requires an aer licence. A trial is available by registering an email address at [octoberswimmer.com](https://www.octoberswimmer.com/tools/aer/subscribe/); without one the server stops after five minutes.
+
+Note this is separate from `aer test`, whose free tier allows 100 test methods per iteration with an unlimited number of iterations.
+
+### Configuration
+
+The plugin supports configuration through a JSON file and CLI flags. CLI flags always take precedence over config file values.
+
+#### Config File
+
+By default, the plugin looks for a `.mutation-testing.json` file at the root of your project. Use `--config-file` to specify a custom path.
+
+The config file supports the following attributes:
+
+```json
+{
+  "mutators": {
+    "include": ["ArithmeticOperator", "BoundaryCondition"],
+    "exclude": ["Increment", "InlineConstant"]
+  },
+  "testMethods": {
+    "include": ["testCalculateTotal", "testEdgeCases"],
+    "exclude": ["slowIntegrationTest"]
+  },
+  "threshold": 80,
+  "skipPatterns": ["System\\.debug", "Logger\\."],
+  "lines": ["1-10", "25-30", "42"],
+  "mutationGrouping": true
+}
+```
+
+| Attribute             | Type       | Description                                                                                                       |
+| --------------------- | ---------- | ----------------------------------------------------------------------------------------------------------------- |
+| `mutators.include`    | `string[]` | Only apply these mutation operators (see [Supported Mutation Operators](#supported-mutation-operators) for names) |
+| `mutators.exclude`    | `string[]` | Apply all operators except these                                                                                  |
+| `testMethods.include` | `string[]` | Only use these test methods to evaluate mutations                                                                 |
+| `testMethods.exclude` | `string[]` | Use all test methods except these                                                                                 |
+| `threshold`           | `number`   | Minimum mutation score (0–100) required for the command to succeed                                                |
+| `skipPatterns`        | `string[]` | RE2 regex patterns to skip lines from mutation (e.g., `System\\.debug`)                                           |
+| `lines`               | `string[]` | Line ranges to restrict mutation to (e.g., `1-10`, `42`)                                                          |
+| `mutationGrouping`    | `boolean`  | Pack mutations with disjoint tests into one deploy + run (clique → DSATUR → exact coloring). Off by default.      |
+
+**Mutual exclusivity:** You cannot specify both `include` and `exclude` within the same group.
+For example, setting both `mutators.include` and `mutators.exclude` will result in an error.
+The same applies to `testMethods.include` and `testMethods.exclude`.
+This constraint is enforced across both the config file and CLI flags —
+if `--include-mutators` is passed via CLI and `mutators.exclude` is set in the config file,
+the CLI value takes precedence and the config file value is ignored.
+
+**Precedence:** CLI flags always override config file values. If both provide a value for the same attribute, the CLI flag wins.
+
+```sh
+# Use a custom config file
+sf apex mutation test run --apex-class MyClass --test-class MyClassTest --config-file config/mutation.json
+```
+
+#### Mutator Filtering
+
+Restrict which mutation operators are applied using include or exclude lists. Names are case-insensitive and match the operator names from the [Supported Mutation Operators](#supported-mutation-operators) table. Unknown names emit a warning and are skipped.
+
+```sh
+# Only apply arithmetic and boundary mutations
+sf apex mutation test run --apex-class MyClass --test-class MyClassTest \
+  --include-mutators ArithmeticOperator --include-mutators BoundaryCondition
+
+# Apply all mutations except increment
+sf apex mutation test run --apex-class MyClass --test-class MyClassTest \
+  --exclude-mutators Increment
+```
+
+#### Test Method Filtering
+
+Restrict which test methods are used to evaluate mutations using include or exclude lists. A bare method name applies to that method in every test class in the perimeter; qualify it as `ClassName.methodName` to target one class only, or `ns.ClassName.methodName` when that class is namespaced. Matching is case-insensitive.
+
+```sh
+# Only run those test methods
+sf apex mutation test run --apex-class MyClass --test-class MyClassTest \
+  --include-test-methods testCalculateTotal --include-test-methods testEdgeCases
+
+# Don't run those test methods
+sf apex mutation test run --apex-class MyClass --test-class MyClassTest \
+  --exclude-test-methods slowIntegrationTest --exclude-test-methods anotherSlowTest
+```
+
+#### Threshold
+
+Set a minimum mutation score (0–100). The command fails with a non-zero exit code if the score falls below the threshold:
+
+```sh
+sf apex mutation test run --apex-class MyClass --test-class MyClassTest --threshold 80
+```
+
+#### Skip Patterns
+
+Skip lines matching specific patterns from mutation using RE2 regular expressions. Any line whose source text matches at least one pattern is excluded from mutation generation. This is useful for skipping logging, debug, or assertion statements that don't need mutation testing.
+
+```sh
+# Skip mutations on logging and debug statements
+sf apex mutation test run --apex-class MyClass --test-class MyClassTest \
+  --skip-patterns 'System\.debug' \
+  --skip-patterns 'System\.assert' \
+  --skip-patterns 'Logger\.'
+```
+
+Config file equivalent:
+
+```json
+{
+  "skipPatterns": ["System\\.debug", "System\\.assert", "Logger\\."]
+}
+```
+
+#### Line Ranges
+
+Restrict mutation testing to specific line ranges using `--lines`. Only lines within the specified ranges (and covered by tests) are eligible for mutation. Each value is either a single line number or a start-end range.
+
+```sh
+# Mutate only specific line ranges
+sf apex mutation test run --apex-class MyClass --test-class MyClassTest \
+  --lines 1-10 \
+  --lines 25-30 \
+  --lines 42
+```
+
+Config file equivalent:
+
+```json
+{
+  "lines": ["1-10", "25-30", "42"]
+}
+```
+
+#### Mutation Grouping
+
+Run multiple independent mutations in a single deployment + test run by passing `--mutation-grouping`. The flag turns on a three-stage pipeline:
+
+1. **Lower-bound clique** — for every test method, gather the mutations it covers; the largest such set is a clique in the conflict graph and a free lower bound on the chromatic number.
+2. **DSATUR** — pre-color the witness clique, then partition the remaining mutations with the strongest polynomial-time graph-coloring heuristic (Brélaz 1979). Two mutations share a group iff their covering tests are pairwise disjoint.
+3. **Exact backtracking coloring** — binary-search for the chromatic number using DSATUR-style backtracking, seeded by the witness clique. Confirms DSATUR was already optimal or finds a strictly smaller partition. No external solver, no runtime dependency — pure TypeScript.
+
+Each group is then deployed once and its union of covering tests run once; per-method test outcomes are reverse-mapped back to individual mutations. This reduces the number of Tooling-API class updates and async test-run kickoffs (the network-bound dominant cost) without changing test execution time. Off by default.
+
+```sh
+# Enable mutation grouping
+sf apex mutation test run --apex-class MyClass --test-class MyClassTest --mutation-grouping
+```
+
+Config file equivalent:
+
+```json
+{
+  "mutationGrouping": true
+}
+```
+
+If a batched deploy or test run fails, the affected group automatically falls back to per-mutant evaluation — so worst case is identical to today's behavior plus one wasted batch attempt.
+
+##### Diff-Based Mutation Testing with Git
+
+You can derive line ranges from `git diff` to focus mutation testing on recently changed code. This is particularly useful in CI pipelines to only test mutations on lines affected by a pull request.
+
+```sh
+# Get changed line ranges from git diff
+git diff --unified=0 <commit-sha> -- path/to/MyClass.cls \
+  | grep '^@@' \
+  | sed 's/.*+\([0-9]*\),\?\([0-9]*\).*/\1-\2/'
+
+# Example output:
+# 12-15
+# 42-42
+# 78-85
+
+# Use the output directly with the CLI
+sf apex mutation test run \
+  -c MyClass -t MyClassTest -o myOrg \
+  $(git diff --unified=0 HEAD~1 -- path/to/MyClass.cls \
+    | grep '^@@' \
+    | sed 's/.*+\([0-9]*\),\?\([0-9]*\).*/--lines \1-\2/')
+```
+
+### Supported Mutation Operators
+
+The plugin currently supports the following mutation operators. If your code doesn't contain any of these patterns on covered lines, no mutations will be generated. The operator names in the first column are the values to use with `--include-mutators` and `--exclude-mutators` flags:
+
+| Operator                       | Description                                       | Example                                  |
+| ------------------------------ | ------------------------------------------------- | ---------------------------------------- |
+| **ArgumentPropagation**        | Replaces method call with matching argument       | `obj.method(arg)` → `arg`                |
+| **ArithmeticOperator**         | Swaps arithmetic operators                        | `a + b` → `a - b`                        |
+| **ArithmeticOperatorDeletion** | Removes operator, keeps one operand               | `a + b` → `a`                            |
+| **BitwiseOperator**            | Swaps bitwise operators                           | `a & b` → `a \| b`                       |
+| **BoundaryCondition**          | Modifies comparison boundaries                    | `<` → `<=`, `>` → `>=`                   |
+| **ConstructorCall**            | Replaces object instantiation with null           | `new Account()` → `null`                 |
+| **EmptyReturn**                | Replaces return with type-appropriate empty value | `return list` → `return new List<T>()`   |
+| **EqualityCondition**          | Swaps equality operators                          | `==` → `!=`, `!=` → `==`                 |
+| **ExperimentalSwitch**         | Modifies switch/when structure                    | Removes else, swaps adjacent when values |
+| **FalseReturn**                | Replaces boolean return with false                | `return condition` → `return false`      |
+| **Increment**                  | Swaps increment/decrement                         | `i++` → `i--`, `--i` → `++i`             |
+| **InlineConstant**             | Mutates literal values                            | `5` → `0`, `true` → `false`              |
+| **InvertNegatives**            | Removes unary negation                            | `-x` → `x`                               |
+| **LogicalOperator**            | Swaps logical operators                           | `a && b` → `a \|\| b`                    |
+| **LogicalOperatorDeletion**    | Removes operator, keeps one operand               | `a && b` → `a`                           |
+| **MemberVariable**             | Removes field initializer                         | `Integer x = 5` → `Integer x`            |
+| **NakedReceiver**              | Replaces method call with receiver                | `receiver.method()` → `receiver`         |
+| **Negation**                   | Adds negation to numeric returns                  | `return 5` → `return -5`                 |
+| **NonVoidMethodCall**          | Replaces method call with type default            | `x = obj.get()` → `x = null`             |
+| **NullReturn**                 | Replaces return with null                         | `return obj` → `return null`             |
+| **RemoveConditionals**         | Replaces if conditions with constant              | `if (cond)` → `if (true)`                |
+| **RemoveIncrements**           | Removes increment/decrement entirely              | `i++` → `i`, `++i` → `i`                 |
+| **Switch**                     | Empties switch/when blocks                        | `when 1 { code }` → `when 1 {}`          |
+| **TrueReturn**                 | Replaces boolean return with true                 | `return condition` → `return true`       |
+| **UnaryOperatorInsertion**     | Inserts increment/decrement operators             | `variable` → `variable++`                |
+| **VoidMethodCall**             | Removes void method call entirely                 | `obj.doSomething()` → (removed)          |
+
+### Mutation Result Statuses
+
+Each mutant is assigned a status after evaluation:
+
+#### Killed
+
+A **Killed** mutant means your tests detected the mutation and failed as a result. This is the ideal outcome. It proves your tests are actively verifying the behavior that was changed. For example, if `subTotal + tax` is mutated to `subTotal - tax` and your test fails, the mutant is killed.
+
+A governor-limit exception (e.g. too many SOQL queries) is also reported as Killed. The org reports it as an ordinary failing test row rather than throwing, so it is scored through the same attribution as any other failing test — no special-casing needed.
+
+**What to look for:** A high number of killed mutants indicates strong, assertion-rich tests that validate actual logic and branch coverage rather than just executing code paths.
+
+#### Survived
+
+A **Survived** mutant means the mutation was introduced, your tests ran against it, and they all still passed. This is the most actionable status. It reveals a gap in your test assertions. The code was changed, but no test noticed.
+
+**What to look for:** Survived mutants highlight areas where you need stronger assertions. Common causes include:
+
+- Missing assertions on return values or side effects
+- Tests that only check happy-path structure without verifying computed values
+- Assertions that are too broad (e.g. checking not-null instead of checking the exact value)
+
+#### CompileError
+
+A **CompileError** mutant means the mutated code failed to compile during deployment, so no tests were run against it. This typically happens when a mutation tool produces syntactically invalid Apex code. You may ignore these and report them as an issue to us.
+
+**What to look for:** Compile errors are excluded from the score entirely. They do not indicate a problem with your tests. The mutation simply wasn't valid for that code.
+
+#### RuntimeError
+
+A **RuntimeError** means an unexpected error occurred during the mutation evaluation. These errors are the result of networking issues, authorization issues, or other issues not directly related to your code. Any thrown error the plugin can't specifically recognize as a compile failure falls into this status; it still counts as a kill in the score (see [Mutation Score](#mutation-score) below), only the reported label and reason differ from Killed.
+
+**What to look for:** A high number of runtime errors may indicate connectivity or org stability issues. If you see many runtime errors, consider re-running the mutation test when the environment is more stable to get more accurate results.
+
+#### NoCoverage
+
+A **NoCoverage** mutant means the mutated line is not covered by any of your test methods. Since the test never executes that line, the mutation cannot be detected. These mutants count against your score the same way survived mutants do.
+
+**What to look for:** NoCoverage mutants point to lines your tests never reach. Adding tests that exercise those code paths will both improve your code coverage and your mutation score.
+
+#### Mutation Score
+
+The mutation score measures how effective your tests are at detecting code changes:
+
+```text
+Score = (Killed + RuntimeError) / (Killed + RuntimeError + Survived + NoCoverage) * 100
+```
+
+- **CompileError** mutants are excluded from the total since they represent invalid mutations, not test gaps.
+- **Survived** and **NoCoverage** mutants lower your score because they represent undetected changes.
+
+A higher score means your tests are better at catching real bugs. Aim to reduce survived mutants by adding targeted assertions for the specific logic each surviving mutation affected.
+
+<!-- markdownlint-disable MD040 -->
+<!-- commands -->
+* [`sf apex mutation test run`](#sf-apex-mutation-test-run)
+
+## `sf apex mutation test run`
+
+Evaluate test coverage quality by injecting mutations and measuring test detection rates
+
+```
+USAGE
+  $ sf apex mutation test run -c <value> -o <value> [--json] [--flags-dir <value>] [-t <value>...] [--test-suite <value>...]
+    [-r <value>] [-d] [--include-mutators <value>... | --exclude-mutators <value>...] [--include-test-methods <value>...
+    | --exclude-test-methods <value>...] [--threshold <value>] [-s <value>...] [-l <value>...] [--config-file <value>]
+    [--mutation-grouping] [--api-version <value>]
+
+FLAGS
+  -c, --apex-class=<value>               (required) Apex class name to mutate. A bare name reaches only the namespace
+                                         that owns it; name a class from another namespace as `namespace.ClassName`.
+  -d, --dry-run                          Preview mutations without deploying or running tests
+  -l, --lines=<value>...                 Line ranges to mutate (e.g., 1-10, 42). Only these lines are eligible for
+                                         mutation.
+  -o, --target-org=<value>               (required) Username or alias of the target org. Not required if the
+                                         `target-org` configuration variable is already set.
+  -r, --report-dir=<value>               [default: mutations] Path to the directory where mutation test reports will be
+                                         generated
+  -s, --skip-patterns=<value>...         RE2 regex patterns to skip lines from mutation (e.g., System\.debug)
+  -t, --test-class=<value>...            Apex test class name(s) to validate mutations. Repeat the flag or pass a
+                                         comma-delimited list to cover a class with multiple test classes. A bare name
+                                         reaches only the namespace that owns it; name a class from another namespace as
+                                         `namespace.ClassName`.
+      --api-version=<value>              Override the api version used for api requests made by this command
+      --config-file=<value>              Path to mutation testing configuration file
+      --exclude-mutators=<value>...      Mutator names to exclude
+      --exclude-test-methods=<value>...  Test method names to exclude. Bare `methodName` applies to that method in every
+                                         test class in the perimeter; qualified `ClassName.methodName` applies to that
+                                         one class only; `namespace.ClassName.methodName` names a class from another
+                                         namespace. Matching ignores case.
+      --include-mutators=<value>...      Mutator names to include (e.g. ArithmeticOperator, BoundaryCondition)
+      --include-test-methods=<value>...  Test method names to include. Bare `methodName` applies to that method in every
+                                         test class in the perimeter; qualified `ClassName.methodName` applies to that
+                                         one class only; `namespace.ClassName.methodName` names a class from another
+                                         namespace. Matching ignores case.
+      --mutation-grouping                Group mutations whose covering tests are disjoint into a single deploy + test
+                                         run. Reduces deployments and async test-run kickoffs at the cost of larger
+                                         blast radius on compile errors. Runs the full pipeline: test-induced clique
+                                         lower bound → DSATUR heuristic → exact backtracking coloring. Off by default.
+      --test-suite=<value>...            Apex test suite name(s) whose classes define the mutation perimeter. Repeat the
+                                         flag or pass a comma-delimited list. Suite names are case-sensitive.
+      --threshold=<value>                Minimum mutation score (0-100) required for the command to succeed
+
+GLOBAL FLAGS
+  --flags-dir=<value>  Import flag values from a directory.
+  --json               Format output as json.
+
+DESCRIPTION
+  Evaluate test coverage quality by injecting mutations and measuring test detection rates
+
+  The Apex Mutation Testing plugin helps evaluate the effectiveness of your Apex test classes by introducing mutations
+  into your code and checking if your tests can detect these changes:
+
+  The plugin provides insights into how trustworthy your test suite is by measuring its ability to catch intentional
+  code changes.
+
+EXAMPLES
+  Run mutation testing on a class with its test file:
+
+    $ sf apex mutation test run --apex-class MyClass --test-class MyClassTest
+
+  Preview mutations without running them:
+
+    $ sf apex mutation test run --apex-class MyClass --test-class MyClassTest --dry-run
+
+  Run mutation testing on a class covered by multiple test classes:
+
+    $ sf apex mutation test run --apex-class MyClass --test-class MyClassTest,MyClassTest2
+
+  Run mutation testing on a class covered by an Apex test suite:
+
+    $ sf apex mutation test run --apex-class MyClass --test-suite MyTestSuite
+```
+
+_See code: [src/commands/apex/mutation/test/run.ts](https://github.com/scolladon/apex-mutation-testing/blob/main/src/commands/apex/mutation/test/run.ts)_
+<!-- commandsstop -->
+<!-- markdownlint-enable MD040 -->
+
+## Changelog
+
+[changelog.md](CHANGELOG.md) is available for consultation.
+
+## Versioning
+
+Versioning follows [SemVer](http://semver.org/) specification.
+
+## Authors
+
+- **Sebastien Colladon** - Developer - [scolladon](https://github.com/scolladon)
+- **Saman Attar** - Developer - [saman](https://github.com/SamanAttar)
+
+Special thanks to **Sara Sali** for her [presentation at Dreamforce](https://www.youtube.com/watch?v=8PjzrTaNNns) about apex mutation testing
+This repository is basically a port of her idea / repo to a sf plugin.
+
+## Contributing
+
+Contributions are what make the trailblazer community such an amazing place. I regard this component as a way to inspire and learn from others. Any contributions you make are **appreciated**.
+
+See [contributing.md](CONTRIBUTING.md) for sgd contribution principles.
+
+## License
+
+This project license is MIT - see the [LICENSE.md](LICENSE.md) file for details

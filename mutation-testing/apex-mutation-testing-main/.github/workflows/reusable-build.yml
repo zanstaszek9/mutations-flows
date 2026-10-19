@@ -1,0 +1,46 @@
+---
+name: Build Checks
+on:
+  workflow_call:
+
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Floating: previous LTS, active LTS, current. These shift when a new
+        # LTS is cut (Oct), so engines.node must move with them or CI stops
+        # testing a version the manifest still promises.
+        node: ['lts/-1', 'lts/*', 'latest']
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v7
+
+      - name: Setup node
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Setup dependencies, cache and install
+        uses: ./.github/actions/install
+
+      - name: Lint plugin
+        run: npm run lint
+
+      - name: Build plugin
+        run: npm pack
+
+      - name: Unit test
+        run: npm run test:unit
+
+      - name: NUT test
+        run: npm run test:nut
+
+      # Once, from the active-LTS leg: upload-artifact rejects '/' and '*' in a
+      # name, and the matrix values now contain both.
+      - uses: actions/upload-artifact@v7
+        if: matrix.node == 'lts/*'
+        with:
+          name: coverage-test-report
+          path: reports/coverage

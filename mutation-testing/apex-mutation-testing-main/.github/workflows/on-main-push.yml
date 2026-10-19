@@ -1,0 +1,44 @@
+---
+name: Main
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - "**.md"
+
+# Least-privilege default; jobs that need more escalate explicitly.
+permissions:
+  contents: read
+
+jobs:
+  build:
+    uses: ./.github/workflows/reusable-build.yml
+
+  prepare-release:
+    needs: [build]
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: googleapis/release-please-action@v5
+        id: release
+        with:
+          token: ${{ secrets.RELEASE_PAT }}
+          release-type: node
+
+  perf:
+    needs: [prepare-release]
+    if: ${{ needs.prepare-release.outputs.release_created != 'true' }}
+    uses: ./.github/workflows/reusable-perf.yml
+    permissions:
+      # auto-push writes the benchmark history to gh-pages. No pull-requests scope:
+      # comment-on-alert is off and the comparison comment only runs on the PR path.
+      contents: write
+    secrets: inherit
+    with:
+      auto-push: true

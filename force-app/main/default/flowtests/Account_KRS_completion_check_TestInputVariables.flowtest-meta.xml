@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<FlowTest xmlns="http://soap.sforce.com/2006/04/metadata">
+    <flowApiName>Account_KRS_completion_check</flowApiName>
+    <flowTestDataSources>
+        <apexClass>FlowDataAccountTest</apexClass>
+        <dataSourceType>ApexClass</dataSourceType>
+    </flowTestDataSources>
+    <flowTestFlowVersions>
+        <flowVersionNumber>1</flowVersionNumber>
+    </flowTestFlowVersions>
+    <isolatedObjectExternalKeys>
+        <keyFields>
+            <fieldName>Name</fieldName>
+        </keyFields>
+        <keyFields>
+            <fieldName>Rating</fieldName>
+        </keyFields>
+        <objectType>Account</objectType>
+    </isolatedObjectExternalKeys>
+    <label>TestInputVariables</label>
+    <testPoints>
+        <elementApiName>Start</elementApiName>
+        <isUseMockOutput>false</isUseMockOutput>
+        <parameters>
+            <leftValueReference>recordId</leftValueReference>
+            <type>InputVariable</type>
+            <value>
+                <jsonValue>{&quot;fields&quot;:{&quot;Name&quot;:&quot;Test Account Warm&quot;,&quot;Rating&quot;:&quot;Warm&quot;},&quot;attributes&quot;:{&quot;type&quot;:&quot;Account&quot;}}</jsonValue>
+            </value>
+        </parameters>
+    </testPoints>
+    <testPoints>
+        <assertions>
+            <conditions>
+                <leftValueReference>Prepare_KRS_check_Task</leftValueReference>
+                <operator>WasVisited</operator>
+                <rightValue>
+                    <booleanValue>true</booleanValue>
+                </rightValue>
+            </conditions>
+        </assertions>
+        <elementApiName>Finish</elementApiName>
+        <isUseMockOutput>false</isUseMockOutput>
+    </testPoints>
+    <testType>WithAssertion</testType>
+</FlowTest>
