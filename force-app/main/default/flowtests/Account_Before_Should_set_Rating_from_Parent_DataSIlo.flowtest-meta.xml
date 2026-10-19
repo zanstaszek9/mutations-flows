@@ -8,12 +8,6 @@
     <flowTestFlowVersions>
         <flowVersionNumber>1</flowVersionNumber>
     </flowTestFlowVersions>
-    <flowTestFlowVersions>
-        <flowVersionNumber>2</flowVersionNumber>
-    </flowTestFlowVersions>
-    <flowTestFlowVersions>
-        <flowVersionNumber>3</flowVersionNumber>
-    </flowTestFlowVersions>
     <isolatedObjectExternalKeys>
         <keyFields>
             <fieldName>Name</fieldName>

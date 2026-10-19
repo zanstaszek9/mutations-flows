@@ -1,0 +1,139 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Flow xmlns="http://soap.sforce.com/2006/04/metadata">
+    <apiVersion>67.0</apiVersion>
+    <areMetricsLoggedToDataCloud>false</areMetricsLoggedToDataCloud>
+    <description>Presentation</description>
+    <environments>Default</environments>
+    <formulas>
+        <description>Maps Task Priority picklist values with Account Rating picklist values</description>
+        <name>TaskPriorityByAccountRating</name>
+        <dataType>String</dataType>
+        <expression>CASE(
+    {!$Record.Rating},
+    &apos;Hot&apos;, &apos;High&apos;,
+    &apos;Warm&apos;, &apos;Normal&apos;,
+    &apos;Cold&apos;, &apos;Low&apos;,
+    &apos;Low&apos;
+)</expression>
+    </formulas>
+    <interviewLabel>Account After {!$Flow.CurrentDateTime}</interviewLabel>
+    <label>Account After</label>
+    <processMetadataValues>
+        <name>BuilderType</name>
+        <value>
+            <stringValue>LightningFlowBuilder</stringValue>
+        </value>
+    </processMetadataValues>
+    <processMetadataValues>
+        <name>CanvasMode</name>
+        <value>
+            <stringValue>AUTO_LAYOUT_CANVAS</stringValue>
+        </value>
+    </processMetadataValues>
+    <processMetadataValues>
+        <name>OriginBuilderType</name>
+        <value>
+            <stringValue>LightningFlowBuilder</stringValue>
+        </value>
+    </processMetadataValues>
+    <processType>AutoLaunchedFlow</processType>
+    <recordCreates>
+        <name>Create_KRS_check_Tasks</name>
+        <label>Create KRS check Tasks</label>
+        <locationX>0</locationX>
+        <locationY>0</locationY>
+        <inputReference>Prepare_KRS_check_Task.krsTask</inputReference>
+    </recordCreates>
+    <recordCreates>
+        <name>Create_reminder_KRS_check_Tasks</name>
+        <label>Create reminder KRS check Tasks</label>
+        <locationX>0</locationX>
+        <locationY>0</locationY>
+        <inputReference>Check_KRS_completion.krsTask</inputReference>
+    </recordCreates>
+    <recordUpdates>
+        <name>Update_Website</name>
+        <label>Update Website</label>
+        <locationX>0</locationX>
+        <locationY>0</locationY>
+        <inputReference>Find_and_fill_Website.recordId</inputReference>
+    </recordUpdates>
+    <start>
+        <locationX>0</locationX>
+        <locationY>0</locationY>
+        <connector>
+            <targetReference>Prepare_KRS_check_Task</targetReference>
+        </connector>
+        <object>Account</object>
+        <recordTriggerType>Create</recordTriggerType>
+        <scheduledPaths>
+            <connector>
+                <targetReference>Find_and_fill_Website</targetReference>
+            </connector>
+            <pathType>AsyncAfterCommit</pathType>
+        </scheduledPaths>
+        <scheduledPaths>
+            <name>After_one_week</name>
+            <connector>
+                <targetReference>Check_KRS_completion</targetReference>
+            </connector>
+            <label>After one week</label>
+            <offsetNumber>10</offsetNumber>
+            <offsetUnit>Minutes</offsetUnit>
+            <timeSource>RecordTriggerEvent</timeSource>
+        </scheduledPaths>
+        <triggerType>RecordAfterSave</triggerType>
+    </start>
+    <status>Draft</status>
+    <subflows>
+        <name>Check_KRS_completion</name>
+        <label>Check KRS completion</label>
+        <locationX>0</locationX>
+        <locationY>0</locationY>
+        <connector>
+            <targetReference>Create_reminder_KRS_check_Tasks</targetReference>
+        </connector>
+        <flowName>Account_KRS_completion_check</flowName>
+        <inputAssignments>
+            <name>recordId</name>
+            <value>
+                <elementReference>$Record</elementReference>
+            </value>
+        </inputAssignments>
+        <storeOutputAutomatically>true</storeOutputAutomatically>
+    </subflows>
+    <subflows>
+        <name>Find_and_fill_Website</name>
+        <label>Find and fill Website</label>
+        <locationX>0</locationX>
+        <locationY>0</locationY>
+        <connector>
+            <targetReference>Update_Website</targetReference>
+        </connector>
+        <flowName>Account_fill_Website</flowName>
+        <inputAssignments>
+            <name>recordId</name>
+            <value>
+                <elementReference>$Record</elementReference>
+            </value>
+        </inputAssignments>
+        <storeOutputAutomatically>true</storeOutputAutomatically>
+    </subflows>
+    <subflows>
+        <name>Prepare_KRS_check_Task</name>
+        <label>Prepare KRS check Task</label>
+        <locationX>0</locationX>
+        <locationY>0</locationY>
+        <connector>
+            <targetReference>Create_KRS_check_Tasks</targetReference>
+        </connector>
+        <flowName>Prepare_KRS_Task</flowName>
+        <inputAssignments>
+            <name>recordId</name>
+            <value>
+                <elementReference>$Record</elementReference>
+            </value>
+        </inputAssignments>
+        <storeOutputAutomatically>true</storeOutputAutomatically>
+    </subflows>
+</Flow>

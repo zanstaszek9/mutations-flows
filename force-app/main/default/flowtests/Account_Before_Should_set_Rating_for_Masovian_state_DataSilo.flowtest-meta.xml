@@ -6,12 +6,6 @@
         <dataSourceType>ApexClass</dataSourceType>
     </flowTestDataSources>
     <flowTestFlowVersions>
-        <flowVersionNumber>3</flowVersionNumber>
-    </flowTestFlowVersions>
-    <flowTestFlowVersions>
-        <flowVersionNumber>2</flowVersionNumber>
-    </flowTestFlowVersions>
-    <flowTestFlowVersions>
         <flowVersionNumber>1</flowVersionNumber>
     </flowTestFlowVersions>
     <isolatedObjectExternalKeys>
