@@ -119,7 +119,7 @@
                 <leftValueReference>$Record.BillingState</leftValueReference>
                 <operator>EqualTo</operator>
                 <rightValue>
-                    <stringValue>Mazowieckie</stringValue>
+                    <stringValue>Masovian</stringValue>
                 </rightValue>
             </conditions>
             <connector>

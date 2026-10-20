@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Flow xmlns="http://soap.sforce.com/2006/04/metadata">
+    <apiVersion>64.0</apiVersion>
+    <areMetricsLoggedToDataCloud>false</areMetricsLoggedToDataCloud>
+    <assignments>
+        <name>Prepare_KRS_check_Task</name>
+        <label>Prepare KRS check Task</label>
+        <locationX>0</locationX>
+        <locationY>0</locationY>
+        <assignmentItems>
+            <assignToReference>krsTask.CallObject</assignToReference>
+            <operator>Assign</operator>
+            <value>
+                <stringValue>Presentation</stringValue>
+            </value>
+        </assignmentItems>
+        <assignmentItems>
+            <assignToReference>krsTask.Priority</assignToReference>
+            <operator>Assign</operator>
+            <value>
+                <elementReference>TaskPriorityByAccountRating</elementReference>
+            </value>
+        </assignmentItems>
+        <assignmentItems>
+            <assignToReference>krsTask.Subject</assignToReference>
+            <operator>Assign</operator>
+            <value>
+                <stringValue>Check KRS data</stringValue>
+            </value>
+        </assignmentItems>
+        <assignmentItems>
+            <assignToReference>krsTask.WhatId</assignToReference>
+            <operator>Assign</operator>
+            <value>
+                <elementReference>recordId.Id</elementReference>
+            </value>
+        </assignmentItems>
+    </assignments>
+    <description>Presentation</description>
+    <environments>Default</environments>
+    <formulas>
+        <description>Maps Task Priority picklist values with Account Rating picklist values</description>
+        <name>TaskPriorityByAccountRating</name>
+        <dataType>String</dataType>
+        <expression>CASE(
+    {!recordId.Rating}, 
+    &apos;Hot&apos;, &apos;High&apos;,
+    &apos;Warm&apos;, &apos;Normal&apos;,
+    &apos;Cold&apos;, &apos;Low&apos;,
+    &apos;Low&apos;)</expression>
+    </formulas>
+    <interviewLabel>Prepare KRS Task {!$Flow.CurrentDateTime}</interviewLabel>
+    <label>Prepare KRS Task</label>
+    <processMetadataValues>
+        <name>BuilderType</name>
+        <value>
+            <stringValue>LightningFlowBuilder</stringValue>
+        </value>
+    </processMetadataValues>
+    <processMetadataValues>
+        <name>CanvasMode</name>
+        <value>
+            <stringValue>AUTO_LAYOUT_CANVAS</stringValue>
+        </value>
+    </processMetadataValues>
+    <processMetadataValues>
+        <name>OriginBuilderType</name>
+        <value>
+            <stringValue>LightningFlowBuilder</stringValue>
+        </value>
+    </processMetadataValues>
+    <processType>AutoLaunchedFlow</processType>
+    <start>
+        <locationX>0</locationX>
+        <locationY>0</locationY>
+        <connector>
+            <targetReference>Prepare_KRS_check_Task</targetReference>
+        </connector>
+    </start>
+    <status>Draft</status>
+    <variables>
+        <name>krsTask</name>
+        <dataType>SObject</dataType>
+        <isCollection>false</isCollection>
+        <isInput>false</isInput>
+        <isOutput>true</isOutput>
+        <objectType>Task</objectType>
+    </variables>
+    <variables>
+        <name>recordId</name>
+        <dataType>SObject</dataType>
+        <isCollection>false</isCollection>
+        <isInput>true</isInput>
+        <isOutput>false</isOutput>
+        <objectType>Account</objectType>
+    </variables>
+</Flow>
