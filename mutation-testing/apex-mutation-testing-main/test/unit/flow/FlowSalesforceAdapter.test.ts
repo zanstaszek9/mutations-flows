@@ -460,9 +460,9 @@ describe('FlowSalesforceAdapter', () => {
         ) => Promise<{ stdout: string; exitCode: number }>
       }
     ).defaultCliExecutor
-    const res = await executor(process.execPath, [
+    const res = await executor('node', [
       '-e',
-      'process.stdout.write("success")',
+      "process.stdout.write('success')",
     ])
     expect(res.exitCode).toBe(0)
     expect(res.stdout).toBe('success')
@@ -479,8 +479,8 @@ describe('FlowSalesforceAdapter', () => {
       }
     ).defaultCliExecutor
     const res = await executor('/non_existent_binary_12345', [])
-    expect(res.exitCode).toBe(1)
-    expect(res.stderr).toContain('ENOENT')
+    expect(res.exitCode).toBeGreaterThanOrEqual(1)
+    expect(res.stderr).toMatch(/ENOENT|not recognized/)
   })
 
   it('defaultCliExecutor handles command execution failure with stdout, exit code and stderr', async () => {
@@ -493,12 +493,423 @@ describe('FlowSalesforceAdapter', () => {
         ) => Promise<{ stdout: string; stderr: string; exitCode: number }>
       }
     ).defaultCliExecutor
-    const res = await executor(process.execPath, [
+    const res = await executor('node', [
       '-e',
-      'process.stdout.write("some stdout"); process.stderr.write("some error"); process.exit(4)',
+      process.platform === 'win32'
+        ? '"process.stdout.write(\'some stdout\'); process.stderr.write(\'some error\'); process.exit(4)"'
+        : "process.stdout.write('some stdout'); process.stderr.write('some error'); process.exit(4)",
     ])
     expect(res.exitCode).toBe(4)
     expect(res.stdout).toBe('some stdout')
     expect(res.stderr).toBe('some error')
+  })
+
+  describe('deployFiles', () => {
+    it('returns success immediately when filePaths is empty', async () => {
+      const adapter = new FlowSalesforceAdapter()
+      const res = await adapter.deployFiles([])
+      expect(res.success).toBe(true)
+    })
+
+    it('deploys multiple files successfully', async () => {
+      const mockExecutor = vi.fn().mockResolvedValue({
+        stdout: JSON.stringify({ status: 0, result: { success: true } }),
+        stderr: '',
+        exitCode: 0,
+      })
+      const adapter = new FlowSalesforceAdapter('test-org', mockExecutor)
+      const res = await adapter.deployFiles(['file1.xml', 'file2.xml'])
+      expect(res.success).toBe(true)
+      expect(mockExecutor).toHaveBeenCalledWith('sf', [
+        'project',
+        'deploy',
+        'start',
+        '--json',
+        '-d',
+        'file1.xml',
+        '-d',
+        'file2.xml',
+        '-o',
+        'test-org',
+      ])
+    })
+
+    it('returns error message on deployment failure', async () => {
+      const mockExecutor = vi.fn().mockResolvedValue({
+        stdout: JSON.stringify({
+          status: 1,
+          result: {
+            details: {
+              componentFailures: [{ problem: 'Test failure in file1' }],
+            },
+          },
+        }),
+        stderr: '',
+        exitCode: 1,
+      })
+      const adapter = new FlowSalesforceAdapter('test-org', mockExecutor)
+      const res = await adapter.deployFiles(['file1.xml'])
+      expect(res.success).toBe(false)
+      expect(res.errorMessage).toBe('Test failure in file1')
+    })
+  })
+
+  describe('getLatestFlowVersion', () => {
+    it('returns versionNumber and flowId when found', async () => {
+      const mockExecutor = vi.fn().mockResolvedValue({
+        stdout: JSON.stringify({
+          status: 0,
+          result: {
+            records: [
+              {
+                Label: 'Account After',
+                VersionNumber: 7,
+                ApiName: 'Account_After',
+                LatestVersionId: '301d00000012345',
+              },
+            ],
+          },
+        }),
+        stderr: '',
+        exitCode: 0,
+      })
+      const adapter = new FlowSalesforceAdapter('test-org', mockExecutor)
+      const res = await adapter.getLatestFlowVersion('Account_After')
+      expect(res.versionNumber).toBe(7)
+      expect(res.flowId).toBe('301d00000012345')
+      expect(mockExecutor).toHaveBeenCalledWith('sf', [
+        'data',
+        'query',
+        '-q',
+        "SELECT Label, VersionNumber, ApiName, LatestVersionId FROM FlowDefinitionView WHERE ApiName = 'Account_After'",
+        '--json',
+        '-o',
+        'test-org',
+      ])
+    })
+
+    it('throws when no records returned', async () => {
+      const mockExecutor = vi.fn().mockResolvedValue({
+        stdout: JSON.stringify({
+          status: 0,
+          result: {
+            records: [],
+          },
+        }),
+        stderr: '',
+        exitCode: 0,
+      })
+      const adapter = new FlowSalesforceAdapter('test-org', mockExecutor)
+      await expect(adapter.getLatestFlowVersion('UnknownFlow')).rejects.toThrow(
+        "No FlowDefinitionView found for Flow 'UnknownFlow'"
+      )
+    })
+  })
+
+  describe('deleteFlowVersion', () => {
+    it('deletes flow version via tooling api successfully', async () => {
+      const mockExecutor = vi.fn().mockResolvedValue({
+        stdout: JSON.stringify({
+          status: 0,
+          result: { id: '301d00000012345', success: true },
+        }),
+        stderr: '',
+        exitCode: 0,
+      })
+      const adapter = new FlowSalesforceAdapter('test-org', mockExecutor)
+      const res = await adapter.deleteFlowVersion('301d00000012345')
+      expect(res).toBe(true)
+      expect(mockExecutor).toHaveBeenCalledWith('sf', [
+        'data',
+        'delete',
+        'record',
+        '-t',
+        '-s',
+        'Flow',
+        '-i',
+        '301d00000012345',
+        '--json',
+        '-o',
+        'test-org',
+      ])
+    })
+
+    it('returns false when delete fails', async () => {
+      const mockExecutor = vi.fn().mockResolvedValue({
+        stdout: 'Error',
+        stderr: 'Cannot delete active version',
+        exitCode: 1,
+      })
+      const adapter = new FlowSalesforceAdapter('test-org', mockExecutor)
+      const res = await adapter.deleteFlowVersion('301d00000012345')
+      expect(res).toBe(false)
+    })
+  })
+
+  describe('runApexTests', () => {
+    it('fails when no test classes specified', async () => {
+      const adapter = new FlowSalesforceAdapter()
+      const res = await adapter.runApexTests([])
+      expect(res.allPassed).toBe(false)
+      expect(res.failingMethods).toEqual(['No Apex test classes specified'])
+    })
+
+    it('returns error when sf logic run test fails or returns no testRunId', async () => {
+      const mockExecutor = vi.fn().mockResolvedValue({
+        stdout: JSON.stringify({
+          status: 1,
+          message: 'Apex class not found: UnknownClass',
+        }),
+        stderr: '',
+        exitCode: 1,
+      })
+      const adapter = new FlowSalesforceAdapter('test-org', mockExecutor, 0, 500)
+      const res = await adapter.runApexTests(['UnknownClass'])
+      expect(res.allPassed).toBe(false)
+      expect(res.failingMethods).toEqual(['Apex class not found: UnknownClass'])
+    })
+
+    it('runs apex tests asynchronously and polls results successfully', async () => {
+      const mockExecutor = vi
+        .fn()
+        // 1st call: sf logic run test
+        .mockResolvedValueOnce({
+          stdout: JSON.stringify({
+            status: 0,
+            result: { testRunId: '707d000000123' },
+          }),
+          stderr: '',
+          exitCode: 0,
+        })
+        // 2nd call: sf logic get test
+        .mockResolvedValueOnce({
+          stdout: JSON.stringify({
+            status: 0,
+            result: {
+              summary: { outcome: 'Passed', failing: 0, testsRan: 2 },
+              tests: [
+                {
+                  MethodName: 'testMethod1',
+                  Outcome: 'Pass',
+                  FullName: 'MyTest.testMethod1',
+                },
+                {
+                  MethodName: 'testMethod2',
+                  Outcome: 'Pass',
+                  FullName: 'MyTest.testMethod2',
+                },
+              ],
+            },
+          }),
+          stderr: '',
+          exitCode: 0,
+        })
+
+      const adapter = new FlowSalesforceAdapter('test-org', mockExecutor, 0, 1000)
+      const res = await adapter.runApexTests(['MyTest'])
+      expect(res.allPassed).toBe(true)
+      expect(res.failingMethods).toHaveLength(0)
+
+      expect(mockExecutor).toHaveBeenNthCalledWith(1, 'sf', [
+        'logic',
+        'run',
+        'test',
+        '--json',
+        '--class-names',
+        'MyTest',
+        '-o',
+        'test-org',
+      ])
+      expect(mockExecutor).toHaveBeenNthCalledWith(2, 'sf', [
+        'logic',
+        'get',
+        'test',
+        '-i',
+        '707d000000123',
+        '--json',
+        '-o',
+        'test-org',
+      ])
+    })
+
+    it('detects failing apex test methods from polled results', async () => {
+      const mockExecutor = vi
+        .fn()
+        .mockResolvedValueOnce({
+          stdout: JSON.stringify({
+            status: 0,
+            result: { testRunId: '707d000000123' },
+          }),
+          stderr: '',
+          exitCode: 0,
+        })
+        .mockResolvedValueOnce({
+          stdout: JSON.stringify({
+            status: 0,
+            result: {
+              summary: { outcome: 'Failed', failing: 1, testsRan: 2 },
+              tests: [
+                {
+                  MethodName: 'testMethod1',
+                  Outcome: 'Pass',
+                  FullName: 'MyTest.testMethod1',
+                },
+                {
+                  MethodName: 'testMethod2',
+                  Outcome: 'Fail',
+                  FullName: 'MyTest.testMethod2',
+                },
+              ],
+            },
+          }),
+          stderr: '',
+          exitCode: 0,
+        })
+
+      const adapter = new FlowSalesforceAdapter('test-org', mockExecutor, 0, 1000)
+      const res = await adapter.runApexTests(['MyTest'])
+      expect(res.allPassed).toBe(false)
+      expect(res.failingMethods).toEqual(['MyTest.testMethod2'])
+    })
+
+    it('handles multiple test classes in a single async run', async () => {
+      const mockExecutor = vi
+        .fn()
+        .mockResolvedValueOnce({
+          stdout: JSON.stringify({
+            status: 0,
+            result: { testRunId: '707d000000MULTI' },
+          }),
+          stderr: '',
+          exitCode: 0,
+        })
+        .mockResolvedValueOnce({
+          stdout: JSON.stringify({
+            status: 0,
+            result: {
+              summary: { outcome: 'Passed', failing: 0, testsRan: 2 },
+              tests: [
+                {
+                  MethodName: 'testA',
+                  Outcome: 'Pass',
+                  FullName: 'ClassA.testA',
+                },
+                {
+                  MethodName: 'testB',
+                  Outcome: 'Pass',
+                  FullName: 'ClassB.testB',
+                },
+              ],
+            },
+          }),
+          stderr: '',
+          exitCode: 0,
+        })
+
+      const adapter = new FlowSalesforceAdapter('test-org', mockExecutor, 0, 1000)
+      const res = await adapter.runApexTests(['ClassA', 'ClassB'])
+      expect(res.allPassed).toBe(true)
+      expect(mockExecutor).toHaveBeenNthCalledWith(1, 'sf', [
+        'logic',
+        'run',
+        'test',
+        '--json',
+        '--class-names',
+        'ClassA',
+        '--class-names',
+        'ClassB',
+        '-o',
+        'test-org',
+      ])
+    })
+
+    it('handles timeout when test run never completes', async () => {
+      const mockExecutor = vi
+        .fn()
+        .mockResolvedValueOnce({
+          stdout: JSON.stringify({
+            status: 0,
+            result: { testRunId: '707d000000TIMEOUT' },
+          }),
+          stderr: '',
+          exitCode: 0,
+        })
+        .mockResolvedValue({
+          stdout: JSON.stringify({
+            status: 0,
+            result: {
+              summary: { outcome: 'Processing', testsRan: 0 },
+              tests: [],
+            },
+          }),
+          stderr: '',
+          exitCode: 0,
+        })
+
+      // Use a timeout of -1 ms so it immediately times out
+      const adapter = new FlowSalesforceAdapter('test-org', mockExecutor, 0, -1)
+      const res = await adapter.runApexTests(['ClassA'])
+      expect(res.allPassed).toBe(false)
+      expect(res.failingMethods[0]).toContain('timed out')
+    })
+
+    it('records baseline duration on first test run and stores it in adapter', async () => {
+      const mockExecutor = vi
+        .fn()
+        .mockResolvedValueOnce({
+          stdout: JSON.stringify({
+            status: 0,
+            result: { testRunId: '707d000000FIRST' },
+          }),
+          stderr: '',
+          exitCode: 0,
+        })
+        .mockResolvedValueOnce({
+          stdout: JSON.stringify({
+            status: 0,
+            result: {
+              summary: { outcome: 'Passed', failing: 0, testsRan: 1 },
+              tests: [{ MethodName: 'testMethod', Outcome: 'Pass' }],
+            },
+          }),
+          stderr: '',
+          exitCode: 0,
+        })
+
+      const adapter = new FlowSalesforceAdapter('test-org', mockExecutor, 0, 1000)
+      expect(adapter.getFirstApexRunDuration()).toBeUndefined()
+      await adapter.runApexTests(['ClassA'])
+      expect(adapter.getFirstApexRunDuration()).toBeGreaterThanOrEqual(1000)
+    })
+
+    it('uses preexisting firstApexRunDurationMs on subsequent runs', async () => {
+      const mockExecutor = vi
+        .fn()
+        .mockResolvedValueOnce({
+          stdout: JSON.stringify({
+            status: 0,
+            result: { testRunId: '707d000000SECOND' },
+          }),
+          stderr: '',
+          exitCode: 0,
+        })
+        .mockResolvedValueOnce({
+          stdout: JSON.stringify({
+            status: 0,
+            result: {
+              summary: { outcome: 'Passed', failing: 0, testsRan: 1 },
+              tests: [{ MethodName: 'testMethod', Outcome: 'Pass' }],
+            },
+          }),
+          stderr: '',
+          exitCode: 0,
+        })
+
+      const adapter = new FlowSalesforceAdapter('test-org', mockExecutor, 0, 1000, 3000)
+      expect(adapter.getFirstApexRunDuration()).toBe(3000)
+      const res = await adapter.runApexTests(['ClassA'])
+      expect(res.allPassed).toBe(true)
+      expect(adapter.getFirstApexRunDuration()).toBe(3000)
+    })
   })
 })

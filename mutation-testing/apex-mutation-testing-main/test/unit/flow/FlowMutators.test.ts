@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  AssignmentMutator,
   ConnectorBypassMutator,
   DecisionOperatorMutator,
   FormulaExpressionMutator,
@@ -315,14 +316,97 @@ describe('Flow XML Mutators', () => {
     expect(mutator.mutate(xml)).toHaveLength(0)
   })
 
-  it('getDefaultFlowMutators returns 4 registered mutators', () => {
+  it('DecisionOperatorMutator inverts boolean conditions such as IsBlank or IsNull', () => {
+    const mutator = new DecisionOperatorMutator()
+    const xml = `<Flow xmlns="${SF_NAMESPACE}">
+      <decisions>
+        <name>Check_Website</name>
+        <rules>
+          <name>Is_Empty</name>
+          <conditions>
+            <leftValueReference>recordId.Website</leftValueReference>
+            <operator>IsBlank</operator>
+            <rightValue>
+              <booleanValue>true</booleanValue>
+            </rightValue>
+          </conditions>
+        </rules>
+      </decisions>
+    </Flow>`
+    const mutants = mutator.mutate(xml)
+    expect(mutants).toHaveLength(1)
+    expect(mutants[0].description).toContain("from 'true' to 'false'")
+    expect(mutants[0].mutatedSnippet).toBe('<booleanValue>false</booleanValue>')
+  })
+
+  it('ConnectorBypassMutator bypasses terminal nodes in rules by removing connector', () => {
+    const mutator = new ConnectorBypassMutator()
+    const xml = `<Flow xmlns="${SF_NAMESPACE}">
+      <assignments>
+        <name>Assign_End</name>
+      </assignments>
+      <decisions>
+        <name>Decision1</name>
+        <rules>
+          <name>Rule1</name>
+          <connector>
+            <targetReference>Assign_End</targetReference>
+          </connector>
+        </rules>
+      </decisions>
+    </Flow>`
+    const mutants = mutator.mutate(xml)
+    expect(mutants).toHaveLength(1)
+    expect(mutants[0].description).toContain('Bypassed terminal assignments element')
+    expect(mutants[0].mutatedXml).not.toContain('<targetReference>Assign_End</targetReference>')
+  })
+
+  it('AssignmentMutator mutates string, boolean, number and operator assignments', () => {
+    const mutator = new AssignmentMutator()
+    const xml = `<Flow xmlns="${SF_NAMESPACE}">
+      <assignments>
+        <name>Assign_Values</name>
+        <assignmentItems>
+          <assignToReference>recordId.Website</assignToReference>
+          <operator>Assign</operator>
+          <value>
+            <stringValue>www.salesforce.com</stringValue>
+          </value>
+        </assignmentItems>
+        <assignmentItems>
+          <assignToReference>recordId.IsActive</assignToReference>
+          <operator>Assign</operator>
+          <value>
+            <booleanValue>true</booleanValue>
+          </value>
+        </assignmentItems>
+        <assignmentItems>
+          <assignToReference>Counter</assignToReference>
+          <operator>Add</operator>
+          <value>
+            <numberValue>5.0</numberValue>
+          </value>
+        </assignmentItems>
+      </assignments>
+    </Flow>`
+    const mutants = mutator.mutate(xml)
+    // 1 string mutation, 1 boolean mutation, 1 number mutation, 1 Add->Subtract mutation
+    expect(mutants).toHaveLength(4)
+    expect(mutants.some(m => m.mutatedSnippet === '<stringValue></stringValue>')).toBe(true)
+    expect(mutants.some(m => m.mutatedSnippet === '<booleanValue>false</booleanValue>')).toBe(true)
+    expect(mutants.some(m => m.mutatedSnippet === '<numberValue>0.0</numberValue>')).toBe(true)
+    expect(mutants.some(m => m.mutatedSnippet === '<operator>Subtract</operator>')).toBe(true)
+  })
+
+  it('getDefaultFlowMutators returns 5 registered mutators', () => {
     const mutators = getDefaultFlowMutators()
-    expect(mutators).toHaveLength(4)
+    expect(mutators).toHaveLength(5)
     expect(mutators.map(m => m.name)).toEqual([
       'RecordTriggerTypeMutator',
       'FormulaExpressionMutator',
       'ConnectorBypassMutator',
       'DecisionOperatorMutator',
+      'AssignmentMutator',
     ])
   })
 })

@@ -3,7 +3,11 @@ import { Messages, SfError } from '@salesforce/core'
 import { Flags, SfCommand } from '@salesforce/sf-plugins-core'
 import { FlowSalesforceAdapter } from '../../../../flow/adapters/FlowSalesforceAdapter.js'
 import { FlowMutationOrchestrator } from '../../../../flow/FlowMutationOrchestrator.js'
-import type { FlowMutationReport } from '../../../../flow/types.js'
+import { FlowHTMLReporter } from '../../../../flow/reporter/FlowHTMLReporter.js'
+import type {
+  FlowMutationReport,
+  FlowOrchestratorCallbacks,
+} from '../../../../flow/types.js'
 
 Messages.importMessagesDirectoryFromMetaUrl(import.meta.url)
 const messages = Messages.loadMessages(
@@ -38,6 +42,12 @@ export default class FlowMutationRun extends SfCommand<FlowMutationRunResult> {
       multiple: true,
       delimiter: ',',
     }),
+    'test-apex': Flags.string({
+      summary: messages.getMessage('flags.test-apex.summary'),
+      aliases: ['ta'],
+      multiple: true,
+      delimiter: ',',
+    }),
     'dry-run': Flags.boolean({
       char: 'd',
       summary: messages.getMessage('flags.dry-run.summary'),
@@ -53,8 +63,22 @@ export default class FlowMutationRun extends SfCommand<FlowMutationRunResult> {
       min: 0,
       max: 100,
     }),
+    'report-dir': Flags.directory({
+      char: 'r',
+      summary: messages.getMessage('flags.report-dir.summary'),
+      default: 'mutations',
+    }),
     'target-org': Flags.optionalOrg(),
     'api-version': Flags.orgApiVersion(),
+  }
+
+  protected override async init(): Promise<void> {
+    this.argv = this.argv.map(arg => {
+      if (arg === '-ta') return '--test-apex'
+      if (arg.startsWith('-ta=')) return '--test-apex=' + arg.slice(4)
+      return arg
+    })
+    await super.init()
   }
 
   public async run(): Promise<FlowMutationRunResult> {
@@ -75,41 +99,104 @@ export default class FlowMutationRun extends SfCommand<FlowMutationRunResult> {
     const adapter = new FlowSalesforceAdapter(orgUsername)
     const orchestrator = new FlowMutationOrchestrator(adapter)
 
-    this.log(
-      `Starting Flow mutation testing for ${flowDeveloperName} (${flowFilePath})...`
+    const isApexTesting = Boolean(
+      flags['test-apex'] && flags['test-apex'].length > 0
     )
+    const testsDisplay = isApexTesting
+      ? flags['test-apex']!.join(', ')
+      : flags['flow-tests']?.join(', ') || flowDeveloperName
+
+    this.log(
+      messages.getMessage(
+        flags['dry-run']
+          ? 'info.DryRunCommandIsRunning'
+          : isApexTesting
+            ? 'info.ApexTestCommandIsRunning'
+            : 'info.CommandIsRunning',
+        flags['dry-run']
+          ? [flowDeveloperName]
+          : [flowDeveloperName, testsDisplay]
+      )
+    )
+
+    const callbacks: FlowOrchestratorCallbacks = {
+      onValidating: () => {
+        this.spinner.start(`Validating "${flowDeveloperName}" Flow XML`)
+      },
+      onValidated: () => {
+        this.spinner.stop('Done')
+      },
+      onBaselineDeploying: () => {
+        this.spinner.start(
+          `Verifying "${flowDeveloperName}" baseline Flow deployment`
+        )
+      },
+      onBaselineDeployed: () => {
+        this.spinner.stop('Done')
+      },
+      onBaselineTesting: () => {
+        this.spinner.start(
+          `Executing "${testsDisplay}" ${isApexTesting ? 'Apex' : 'Flow'} test(s) to verify baseline`
+        )
+      },
+      onBaselineTested: (resultMsg: string) => {
+        this.spinner.stop(resultMsg)
+      },
+      onMutantsGenerating: () => {
+        this.spinner.start(`Generating mutants for "${flowDeveloperName}" Flow`)
+      },
+      onMutantsGenerated: (count: number) => {
+        this.spinner.stop(`${count} mutations generated`)
+      },
+      onProgressStart: (total: number) => {
+        this.progress.start(
+          total,
+          { info: 'Starting mutation testing' },
+          {
+            title: 'MUTATION TESTING PROGRESS',
+            format: '%s | {bar} | {value}/{total} {info}',
+          }
+        )
+      },
+      onProgressUpdate: (current: number, info: string) => {
+        this.progress.update(current, { info })
+      },
+      onProgressFinish: (info: string) => {
+        this.progress.finish({ info })
+      },
+      onRollbackStarting: () => {
+        this.spinner.start(
+          `Rolling back "${flowDeveloperName}" Flow to its original state`
+        )
+      },
+      onRollbackFinished: (failed?: boolean) => {
+        this.spinner.stop(failed ? 'Rollback FAILED' : 'Done')
+      },
+    }
 
     const report = await orchestrator.run({
       flowFilePath,
       flowDeveloperName,
       flowTests: flags['flow-tests'],
+      apexTests: flags['test-apex'],
       lines: flags.lines,
       dryRun: flags['dry-run'],
+      callbacks,
     })
 
-    this.log('')
-    this.log('Mutation Testing Results:')
-    this.table({
-      data: report.mutants.map(m => ({
-        id: m.id,
-        line: m.lineNumber ? String(m.lineNumber) : '-',
-        element: m.elementName,
-        mutator: m.mutatorName,
-        status: m.status,
-        description: m.description,
-      })),
-      columns: ['id', 'line', 'element', 'mutator', 'status', 'description'],
-    })
+    const reporter = new FlowHTMLReporter()
+    const reportDir = await reporter.generateReport(
+      report,
+      flags['report-dir'] ?? 'mutations'
+    )
+    this.log(messages.getMessage('info.reportGenerated', [reportDir]))
 
-    this.log('')
-    this.log(`Total Mutants: ${report.totalMutants}`)
-    this.log(`Killed:        ${report.killed}`)
-    this.log(`Survived:      ${report.survived}`)
-    this.log(`CompileErrors: ${report.compileErrors}`)
-    this.log(
-      `Mutation Score: ${
-        flags['dry-run'] ? 'N/A (Dry Run)' : `${report.mutationScore}%`
-      }`
+    const score = flags['dry-run'] ? null : report.mutationScore
+    if (score !== null) {
+      this.log(`Mutation score: ${score}%`)
+    }
+    this.info(
+      '💡 Enjoying apex-mutation-testing?\nYour contribution helps us provide fast support 🚀 and high quality features 🔥\nBecome a sponsor: https://github.com/sponsors/scolladon 💙'
     )
 
     if (
@@ -123,7 +210,7 @@ export default class FlowMutationRun extends SfCommand<FlowMutationRunResult> {
     }
 
     return {
-      score: flags['dry-run'] ? null : report.mutationScore,
+      score,
       report,
     }
   }

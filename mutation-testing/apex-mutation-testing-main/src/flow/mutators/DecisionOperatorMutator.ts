@@ -21,36 +21,84 @@ export class DecisionOperatorMutator implements FlowMutator {
     decisionNodes.forEach((decisionNode, dIdx) => {
       const decisionName =
         baseDom.getText('sf:name', decisionNode) ?? `Decision_${dIdx}`
-      const operatorNodes = baseDom.queryNodes(
-        './/sf:conditions/sf:operator',
+
+      const conditionNodes = baseDom.queryNodes(
+        './/sf:conditions',
         decisionNode
       )
 
-      operatorNodes.forEach((opNode, opIdx) => {
-        const currentOp = opNode.textContent?.trim()
-        if (!currentOp) return
-        const invertedOp = OPERATOR_INVERSIONS[currentOp]
-        if (!invertedOp) return
+      conditionNodes.forEach((condNode, cIdx) => {
+        const opNodes = baseDom.queryNodes('.//sf:operator', condNode)
+        const currentOp = opNodes[0]?.textContent?.trim()
 
-        const clonedDom = FlowXmlDom.parse(xmlContent)
-        const targetDecision = clonedDom.queryNodes('//sf:decisions')[dIdx]
-        const targetOpNode = clonedDom.queryNodes(
-          './/sf:conditions/sf:operator',
-          targetDecision
-        )[opIdx]
-        targetOpNode.textContent = invertedOp
+        // 1. Invert operator if in OPERATOR_INVERSIONS
+        if (currentOp && OPERATOR_INVERSIONS[currentOp]) {
+          const invertedOp = OPERATOR_INVERSIONS[currentOp]
+          const clonedDom = FlowXmlDom.parse(xmlContent)
+          const targetDecision = clonedDom.queryNodes('//sf:decisions')[dIdx]
+          const targetCond = clonedDom.queryNodes(
+            './/sf:conditions',
+            targetDecision
+          )[cIdx]
+          const targetOpNode = clonedDom.queryNodes(
+            './/sf:operator',
+            targetCond
+          )[0]
+          targetOpNode.textContent = invertedOp
 
-        const line = (opNode as unknown as { lineNumber?: number }).lineNumber
+          const line =
+            (opNodes[0] as unknown as { lineNumber?: number }).lineNumber
 
-        results.push({
-          mutatorName: this.name,
-          elementName: decisionName,
-          lineNumber: line,
-          description: `Inverted condition operator '${currentOp}' to '${invertedOp}' in decision '${decisionName}'`,
-          originalSnippet: `<operator>${currentOp}</operator>`,
-          mutatedSnippet: `<operator>${invertedOp}</operator>`,
-          mutatedXml: clonedDom.serialize(),
-        })
+          results.push({
+            mutatorName: this.name,
+            elementName: decisionName,
+            lineNumber: line,
+            description: `Inverted condition operator '${currentOp}' to '${invertedOp}' in decision '${decisionName}'`,
+            originalSnippet: `<operator>${currentOp}</operator>`,
+            mutatedSnippet: `<operator>${invertedOp}</operator>`,
+            mutatedXml: clonedDom.serialize(),
+          })
+        }
+
+        // 2. Invert rightValue booleanValue (e.g. for IsBlank, IsNull, or boolean equality)
+        const boolNodes = baseDom.queryNodes(
+          './/sf:rightValue/sf:booleanValue',
+          condNode
+        )
+        if (boolNodes.length > 0) {
+          const currentBool = boolNodes[0]?.textContent?.trim().toLowerCase()
+          if (currentBool === 'true' || currentBool === 'false') {
+            const invertedBool = currentBool === 'true' ? 'false' : 'true'
+            const leftRef =
+              baseDom.getText('sf:leftValueReference', condNode) ?? 'condition'
+
+            const clonedDom = FlowXmlDom.parse(xmlContent)
+            const targetDecision = clonedDom.queryNodes('//sf:decisions')[dIdx]
+            const targetCond = clonedDom.queryNodes(
+              './/sf:conditions',
+              targetDecision
+            )[cIdx]
+            const targetBoolNode = clonedDom.queryNodes(
+              './/sf:rightValue/sf:booleanValue',
+              targetCond
+            )[0]
+            targetBoolNode.textContent = invertedBool
+
+            const line =
+              (boolNodes[0] as unknown as { lineNumber?: number }).lineNumber ??
+              (condNode as unknown as { lineNumber?: number }).lineNumber
+
+            results.push({
+              mutatorName: this.name,
+              elementName: decisionName,
+              lineNumber: line,
+              description: `Inverted condition '${leftRef} ${currentOp ?? ''}' from '${currentBool}' to '${invertedBool}' in decision '${decisionName}'`,
+              originalSnippet: `<booleanValue>${currentBool}</booleanValue>`,
+              mutatedSnippet: `<booleanValue>${invertedBool}</booleanValue>`,
+              mutatedXml: clonedDom.serialize(),
+            })
+          }
+        }
       })
     })
 

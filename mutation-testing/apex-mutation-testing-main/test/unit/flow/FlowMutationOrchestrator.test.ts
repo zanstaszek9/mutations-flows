@@ -19,6 +19,19 @@ const VALID_FLOW_XML = `<?xml version="1.0" encoding="UTF-8"?>
         <recordTriggerType>Create</recordTriggerType>
         <triggerType>RecordAfterSave</triggerType>
     </start>
+    <status>Draft</status>
+</Flow>`
+
+const ACTIVE_FLOW_XML = `<?xml version="1.0" encoding="UTF-8"?>
+<Flow xmlns="${SF_NAMESPACE}">
+    <apiVersion>67.0</apiVersion>
+    <description>Original Description</description>
+    <processType>AutoLaunchedFlow</processType>
+    <start>
+        <object>Account</object>
+        <recordTriggerType>Create</recordTriggerType>
+        <triggerType>RecordAfterSave</triggerType>
+    </start>
     <status>Active</status>
 </Flow>`
 
@@ -312,5 +325,138 @@ describe('FlowMutationOrchestrator', () => {
     expect(report.killed).toBe(0)
     expect(report.survived).toBe(0)
     expect(report.mutants[0].status).toBe('CompileError')
+  })
+
+  describe('Active Flow Version Management', () => {
+    it('deactivates active flow, triggers new version, updates flowtests, and cleans up on rollback', async () => {
+      // Setup active flow
+      await fs.writeFile(tempFlowFile, ACTIVE_FLOW_XML, 'utf-8')
+
+      // Create a sibling flowtests directory and a dummy flowtest file
+      const flowTestsDir = path.join(tempDir, '../flowtests')
+      await fs.mkdir(flowTestsDir, { recursive: true })
+      const flowTestPath = path.join(
+        flowTestsDir,
+        'Account_Before_Test.flowtest-meta.xml'
+      )
+      const flowTestContent = `<?xml version="1.0" encoding="UTF-8"?>
+<FlowTest xmlns="${SF_NAMESPACE}">
+    <flowApiName>Account_Before</flowApiName>
+    <flowTestFlowVersions>
+        <flowVersionNumber>1</flowVersionNumber>
+    </flowTestFlowVersions>
+</FlowTest>`
+      await fs.writeFile(flowTestPath, flowTestContent, 'utf-8')
+
+      const deployedXmls: string[] = []
+      const deployedFilesList: string[][] = []
+
+      const mockPort: FlowSalesforcePort = {
+        deployFlowXml: vi.fn().mockImplementation(async (_, xml: string) => {
+          deployedXmls.push(xml)
+          return { success: true }
+        }),
+        deployFiles: vi.fn().mockImplementation(async (files: string[]) => {
+          deployedFilesList.push(files)
+          return { success: true }
+        }),
+        getLatestFlowVersion: vi.fn().mockResolvedValue({
+          versionNumber: 7,
+          flowId: '301d000000TEMP',
+        }),
+        deleteFlowVersion: vi.fn().mockResolvedValue(true),
+        runFlowTests: vi
+          .fn()
+          .mockResolvedValue({ allPassed: true, failingMethods: [] }),
+        runApexTests: vi.fn(),
+      }
+
+      const orchestrator = new FlowMutationOrchestrator(mockPort)
+      const report = await orchestrator.run({
+        flowFilePath: tempFlowFile,
+        flowDeveloperName: 'Account_Before',
+      })
+
+      expect(report.totalMutants).toBe(1)
+      expect(mockPort.getLatestFlowVersion).toHaveBeenCalledWith('Account_Before')
+      expect(mockPort.deleteFlowVersion).toHaveBeenCalledWith('301d000000TEMP')
+
+      // Verify the flow was first deactivated to Draft
+      expect(deployedXmls[0]).toContain('<status>Draft</status>')
+      // Verify description was changed to trigger new version
+      expect(deployedXmls[1]).toContain('Original Description Mutating')
+
+      // Verify flowtest file was updated to version 7 during run, but rolled back to 1 at the end
+      const finalFlowTestContent = await fs.readFile(flowTestPath, 'utf-8')
+      expect(finalFlowTestContent).toContain('<flowVersionNumber>1</flowVersionNumber>')
+
+      // Verify original active flow XML was restored on disk
+      const finalFlowContent = await fs.readFile(tempFlowFile, 'utf-8')
+      expect(finalFlowContent).toContain('<status>Active</status>')
+
+      // Clean up flowtest dir
+      await fs.rm(flowTestsDir, { recursive: true, force: true })
+    })
+
+    it('throws error when deactivation fails', async () => {
+      await fs.writeFile(tempFlowFile, ACTIVE_FLOW_XML, 'utf-8')
+
+      const mockPort: FlowSalesforcePort = {
+        deployFlowXml: vi.fn().mockResolvedValue({
+          success: false,
+          errorMessage: 'Cannot deactivate locked flow',
+        }),
+        deployFiles: vi.fn(),
+        getLatestFlowVersion: vi.fn(),
+        runFlowTests: vi.fn(),
+        runApexTests: vi.fn(),
+      }
+
+      const orchestrator = new FlowMutationOrchestrator(mockPort)
+      await expect(
+        orchestrator.run({
+          flowFilePath: tempFlowFile,
+          flowDeveloperName: 'Account_Before',
+        })
+      ).rejects.toThrow('Failed to deactivate active Flow "Account_Before": Cannot deactivate locked flow')
+    })
+  })
+
+  describe('Apex Testing Mode', () => {
+    it('executes runApexTests when apexTests are provided and marks mutant as killed when test fails', async () => {
+      let runIndex = 0
+      const mockPort: FlowSalesforcePort = {
+        deployFlowXml: vi.fn().mockResolvedValue({ success: true }),
+        deployFiles: vi.fn(),
+        getLatestFlowVersion: vi.fn(),
+        runFlowTests: vi.fn(),
+        runApexTests: vi.fn().mockImplementation(async (testClasses: string[]) => {
+          runIndex++
+          if (runIndex === 1) {
+            // Baseline test passes
+            return { allPassed: true, failingMethods: [] }
+          }
+          // Mutant test fails -> mutant killed!
+          return {
+            allPassed: false,
+            failingMethods: [`${testClasses[0]}.testAccountDiscount`],
+          }
+        }),
+      }
+
+      const orchestrator = new FlowMutationOrchestrator(mockPort)
+      const report = await orchestrator.run({
+        flowFilePath: tempFlowFile,
+        flowDeveloperName: 'Account_Before',
+        apexTests: ['DiscountCalculatorTest'],
+      })
+
+      expect(report.totalMutants).toBe(1)
+      expect(report.killed).toBe(1)
+      expect(report.survived).toBe(0)
+      expect(report.mutationScore).toBe(100)
+      expect(mockPort.runApexTests).toHaveBeenCalledWith(['DiscountCalculatorTest'])
+      expect(mockPort.runFlowTests).not.toHaveBeenCalled()
+    })
   })
 })

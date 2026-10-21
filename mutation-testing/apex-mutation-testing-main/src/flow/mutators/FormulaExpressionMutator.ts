@@ -37,8 +37,10 @@ export class FormulaExpressionMutator implements FlowMutator {
         )[0]
         targetExprNode.textContent = mutatedExpr
 
-        const line = (targetExprNode as unknown as { lineNumber?: number })
-          .lineNumber
+        const baseLine =
+          (targetExprNode as unknown as { lineNumber?: number }).lineNumber ?? 1
+        const lineOffset = exprText.slice(0, matchIndex).split('\n').length - 1
+        const line = baseLine + lineOffset
 
         results.push({
           mutatorName: this.name,
@@ -78,8 +80,12 @@ export class FormulaExpressionMutator implements FlowMutator {
           )[0]
           targetExprNode.textContent = mutatedExpr
 
-          const line = (targetExprNode as unknown as { lineNumber?: number })
-            .lineNumber
+          const baseLine =
+            (targetExprNode as unknown as { lineNumber?: number })
+              .lineNumber ?? 1
+          const lineOffset =
+            exprText.slice(0, opIndex).split('\n').length - 1
+          const line = baseLine + lineOffset
 
           results.push({
             mutatorName: this.name,

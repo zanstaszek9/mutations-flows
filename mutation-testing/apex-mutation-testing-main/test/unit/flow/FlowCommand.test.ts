@@ -47,6 +47,18 @@ describe('FlowMutationRun Command', () => {
     expect(FlowMutationRun.flags['flow-file']).toBeDefined()
     expect(FlowMutationRun.flags['dry-run']).toBeDefined()
     expect(FlowMutationRun.flags['target-org']).toBeDefined()
+    expect(FlowMutationRun.flags['test-apex']).toBeDefined()
+  })
+
+  it('normalizes -ta argument in init to --test-apex', async () => {
+    const cmd = new FlowMutationRun(
+      ['-f', tempFlowFile, '-ta', 'DiscountCalculatorTest', '-d'],
+      {} as never
+    )
+    // Run protected init
+    await (cmd as unknown as { init: () => Promise<void> }).init()
+    expect((cmd as unknown as { argv: string[] }).argv).toContain('--test-apex')
+    expect((cmd as unknown as { argv: string[] }).argv).not.toContain('-ta')
   })
 
   it('throws when target-org is missing and not dry-run', async () => {

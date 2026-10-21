@@ -28,8 +28,41 @@ export class ConnectorBypassMutator implements FlowMutator {
           node
         )
 
-        // We can bypass a node if it has a known name and a downstream connector targetReference
-        if (!elementName || !outgoingTarget) return
+        if (!elementName) return
+
+        if (!outgoingTarget) {
+          // Terminal node: bypass by removing the incoming connector in rules
+          const ruleConnectors = baseDom.queryNodes(
+            `//sf:rules/sf:connector[sf:targetReference/text()='${elementName}']`
+          )
+          ruleConnectors.forEach((connNode, rIdx) => {
+            const ruleName =
+              baseDom.getText('sf:name', connNode.parentNode) ?? 'Rule'
+            const clonedDom = FlowXmlDom.parse(xmlContent)
+            const targetConns = clonedDom.queryNodes(
+              `//sf:rules/sf:connector[sf:targetReference/text()='${elementName}']`
+            )
+            const targetConn = targetConns[rIdx]
+            if (targetConn && targetConn.parentNode) {
+              targetConn.parentNode.removeChild(targetConn)
+            }
+
+            const line =
+              (connNode as unknown as { lineNumber?: number }).lineNumber ??
+              (node as unknown as { lineNumber?: number }).lineNumber
+
+            results.push({
+              mutatorName: this.name,
+              elementName,
+              lineNumber: line,
+              description: `Bypassed terminal ${tag} element '${elementName}' in rule '${ruleName}' by removing connector`,
+              originalSnippet: `<targetReference>${elementName}</targetReference>`,
+              mutatedSnippet: `<!-- Bypassed ${elementName} -->`,
+              mutatedXml: clonedDom.serialize(),
+            })
+          })
+          return
+        }
 
         // Find all incoming targetReferences pointing to this elementName
         const incomingRefs = baseDom.queryNodes(
@@ -47,7 +80,9 @@ export class ConnectorBypassMutator implements FlowMutator {
           refNode.textContent = outgoingTarget
         }
 
-        const line = (node as unknown as { lineNumber?: number }).lineNumber
+        const line =
+          (incomingRefs[0] as unknown as { lineNumber?: number }).lineNumber ??
+          (node as unknown as { lineNumber?: number }).lineNumber
 
         results.push({
           mutatorName: this.name,

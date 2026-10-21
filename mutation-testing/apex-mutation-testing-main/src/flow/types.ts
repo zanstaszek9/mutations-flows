@@ -37,10 +37,32 @@ export interface FlowSalesforcePort {
     flowFilePath: string,
     xmlContent: string
   ): Promise<FlowDeployResult>
+  deployFiles(filePaths: string[]): Promise<FlowDeployResult>
   runFlowTests(
     flowName: string,
     testNames?: string[]
   ): Promise<FlowTestRunResult>
+  runApexTests(testClasses: string[]): Promise<FlowTestRunResult>
+  getLatestFlowVersion(
+    flowApiName: string
+  ): Promise<{ versionNumber: number; flowId?: string }>
+  deleteFlowVersion?(flowId: string): Promise<boolean>
+}
+
+export interface FlowOrchestratorCallbacks {
+  onValidating?: () => void
+  onValidated?: () => void
+  onBaselineDeploying?: () => void
+  onBaselineDeployed?: () => void
+  onBaselineTesting?: () => void
+  onBaselineTested?: (resultMsg: string) => void
+  onMutantsGenerating?: () => void
+  onMutantsGenerated?: (count: number) => void
+  onProgressStart?: (total: number) => void
+  onProgressUpdate?: (current: number, info: string) => void
+  onProgressFinish?: (info: string) => void
+  onRollbackStarting?: () => void
+  onRollbackFinished?: (failed?: boolean) => void
 }
 
 export interface FlowMutationReport {
@@ -51,4 +73,5 @@ export interface FlowMutationReport {
   compileErrors: number
   mutationScore: number
   mutants: FlowMutant[]
+  originalXml?: string
 }
