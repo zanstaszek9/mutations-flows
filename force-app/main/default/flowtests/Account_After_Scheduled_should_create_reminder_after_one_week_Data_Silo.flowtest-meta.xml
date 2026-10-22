@@ -6,7 +6,7 @@
         <dataSourceType>ApexClass</dataSourceType>
     </flowTestDataSources>
     <flowTestFlowVersions>
-        <flowVersionNumber>1</flowVersionNumber>
+        <flowVersionNumber>6</flowVersionNumber>
     </flowTestFlowVersions>
     <isolatedObjectExternalKeys>
         <keyFields>
